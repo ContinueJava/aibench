@@ -39,6 +39,9 @@ results/
 # data
 *.jsonl
 genai_bench*.log
+
+# build artifacts
+*.zip
 # PyPI configuration file
 .pypirc
 

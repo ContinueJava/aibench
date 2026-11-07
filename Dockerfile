@@ -15,7 +15,7 @@
 # ============================================================================
 
 # ---- Stage 1: frontend build (build-time only) ------------------------------
-FROM node:20-slim AS frontend-build
+FROM node:25-slim AS frontend-build
 WORKDIR /src
 # Build context (whole repo) is needed for frontend/build.mjs, which writes
 # into genai_bench/web/static/. Node exists ONLY in this stage.

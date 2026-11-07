@@ -1,8 +1,8 @@
 """Unified factory for creating model and storage authentication providers."""
 
-import oci.config
-
-# Model auth providers
+# The OCI SDK is an optional dependency (`pip install genai-bench[oci]`) and is
+# imported lazily in the OCI branches below. Importing it at module level made
+# every `genai-bench` command fail outright on an install without it.
 from genai_bench.auth.aws.bedrock_auth import AWSBedrockAuth
 
 # Storage auth providers
@@ -16,8 +16,6 @@ from genai_bench.auth.gcp.gcs_auth import GCPStorageAuth
 from genai_bench.auth.gcp.vertex_auth import GCPVertexAuth
 from genai_bench.auth.github.github_auth import GitHubAuth
 from genai_bench.auth.model_auth_provider import ModelAuthProvider
-from genai_bench.auth.oci.model_auth_adapter import OCIModelAuthAdapter
-from genai_bench.auth.oci.storage_auth_adapter import OCIStorageAuthAdapter
 from genai_bench.auth.openai.auth import OpenAIAuth
 from genai_bench.auth.openai.model_auth_adapter import OpenAIModelAuthAdapter
 from genai_bench.auth.storage_auth_provider import StorageAuthProvider
@@ -50,6 +48,10 @@ class UnifiedAuthFactory:
 
         elif provider == "oci":
             # Use existing OCI auth factory
+            import oci.config
+
+            from genai_bench.auth.oci.model_auth_adapter import OCIModelAuthAdapter
+
             oci_auth = AuthFactory.create_oci_auth(
                 auth_type=kwargs.get("auth_type", "user_principal"),
                 config_path=kwargs.get("config_path", oci.config.DEFAULT_LOCATION),
@@ -114,6 +116,12 @@ class UnifiedAuthFactory:
         """
         if provider == "oci":
             # Use existing OCI auth factory
+            import oci.config
+
+            from genai_bench.auth.oci.storage_auth_adapter import (
+                OCIStorageAuthAdapter,
+            )
+
             oci_auth = AuthFactory.create_oci_auth(
                 auth_type=kwargs.get("auth_type", "user_principal"),
                 config_path=kwargs.get("config_path", oci.config.DEFAULT_LOCATION),

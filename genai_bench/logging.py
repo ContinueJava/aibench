@@ -11,6 +11,38 @@ from rich.live import Live
 from rich.logging import RichHandler
 from rich.panel import Panel
 
+# ``logging.Formatter.formatTime`` uses ``time.strftime``, which does NOT
+# support the ``%f`` (microseconds) directive on every platform: Windows raises
+# ``ValueError: Invalid format string`` while a panel/console/file handler is
+# formatting its first record. Rich's own ``log_time_format`` uses
+# ``datetime.strftime`` and would tolerate ``%f``, but the stdlib formatters
+# cannot, so keep a single portable format for all handlers.
+DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _make_console_streams_error_tolerant() -> None:
+    """Never let an emoji kill a log call on a non-UTF-8 console.
+
+    Windows consoles often use cp936/GBK, and the CLI prints emoji in its
+    banner and result messages. Without this, each of those ``logger.info``
+    calls raises ``UnicodeEncodeError`` inside logging, which the stdlib turns
+    into a long "--- Logging error ---" traceback on stderr -- scary and
+    misleading for an otherwise successful run. ``errors="replace"`` keeps the
+    run clean (the emoji becomes ``?``) without touching the log file, which is
+    always written as UTF-8.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            encoding = (getattr(stream, "encoding", None) or "").lower()
+            if encoding.replace("-", "").replace("_", "") in ("utf8", "utf16", "utf32"):
+                continue
+            reconfigure(errors="replace")
+        except (ValueError, OSError):  # closed or detached stream (e.g. /dev/null)
+            continue
+
 
 class RollingRichPanelHandler(RichHandler):
     """
@@ -37,6 +69,15 @@ class RollingRichPanelHandler(RichHandler):
         log_lines = log_contents.splitlines()
         last_10_lines = log_lines[-self.max_entries :]
         trimmed_log_contents = "\n".join(last_10_lines)
+
+        # `log_buffer` is append-only, so every emit re-reads and re-renders
+        # the whole history: a long run grew this O(n^2) and held every line
+        # in memory. Only the tail is ever displayed, so reset the buffer to
+        # what is actually shown.
+        if len(log_lines) > self.max_entries:
+            self.log_buffer = StringIO()
+            self.log_buffer.write(trimmed_log_contents + "\n")
+            self.console.file = self.log_buffer
         self.layout[self.panel_name].update(
             Panel(trimmed_log_contents, title="Logs", border_style="red")
         )
@@ -68,8 +109,11 @@ class DelayedRichHandler(RichHandler):
             # Emit normally after flushing
             super().emit(record)
 
-        # Exit on error logs
-        if record.levelno >= logging.ERROR:
+        # Only CRITICAL is treated as "cannot continue". Individual request
+        # failures are logged at ERROR/WARNING by the User classes and are a
+        # normal outcome of a load test -- terminating the whole benchmark on
+        # them would hide the error rate that the run is measuring.
+        if record.levelno >= logging.CRITICAL:
             self.flush_buffer()
             sys.exit(1)
 
@@ -123,6 +167,13 @@ class LoggingManager:
         if log_level not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
             log_level = "INFO"
 
+        # The startup banner and several messages contain emoji. On a console
+        # whose code page cannot represent them (e.g. Windows GBK/cp936) every
+        # such log call raises UnicodeEncodeError inside logging and prints a
+        # "--- Logging error ---" traceback, which looks like a crash. Make the
+        # console streams replace unencodable characters instead.
+        _make_console_streams_error_tolerant()
+
         file_handler = self.get_file_handler()
 
         if self.command_type == "benchmark":
@@ -132,7 +183,11 @@ class LoggingManager:
         else:
             extra_handlers = [self.get_rich_handler()]
 
-        logging.basicConfig(level=log_level, handlers=[file_handler, *extra_handlers])
+        logging.basicConfig(
+            level=log_level,
+            handlers=[file_handler, *extra_handlers],
+            force=True,  # Override any existing configuration
+        )
 
         # Set up exception handling
         self.setup_exception_handler()
@@ -162,7 +217,7 @@ class LoggingManager:
     def get_file_handler(self):
         """Return a file handler for logging."""
         file_log_format = "{levelname:<8} {asctime} - {name}:{funcName} - {message}"
-        date_format = "%Y-%m-%d %H:%M:%S.%f"
+        date_format = DATE_FORMAT
 
         # Determine log file path
         if self.log_dir:
@@ -171,7 +226,11 @@ class LoggingManager:
         else:
             log_file = "genai_bench.log"
 
-        file_handler = logging.FileHandler(log_file)
+        # Always UTF-8: the default is the process locale encoding, which on a
+        # Chinese Windows install is cp936/GBK, and the CLI logs emoji -- each
+        # such record then raised UnicodeEncodeError inside logging ("--- Logging
+        # error ---" on stderr) and the message was LOST from genai_bench.log.
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
 
         file_formatter = logging.Formatter(
             file_log_format, datefmt=date_format, style="{"
@@ -184,7 +243,7 @@ class LoggingManager:
     def get_console_handler():
         """Return a console handler for logging with a standard format."""
         log_format = "{levelname:<8} {asctime} - {name}:{funcName} - {message}"
-        date_format = "%Y-%m-%d %H:%M:%S.%f"
+        date_format = DATE_FORMAT
 
         console_handler = logging.StreamHandler(sys.stdout)
         console_formatter = logging.Formatter(
@@ -204,7 +263,7 @@ class LoggingManager:
 
     def init_ui_logging(self):
         """Initialize UI logging handlers for 'benchmark'."""
-        date_format = "%Y-%m-%d %H:%M:%S.%f"
+        date_format = DATE_FORMAT
 
         # Panel handler to stream logs to the logs panel in dashboard
         panel_handler = RollingRichPanelHandler(
@@ -212,8 +271,10 @@ class LoggingManager:
             rich_tracebacks=True,
             log_time_format=date_format,
         )
+        # datefmt only applies when the format string actually contains
+        # %(asctime)s; without it the panel never showed timestamps.
         panel_formatter = logging.Formatter(
-            "%(message)s", datefmt=date_format, style="%"
+            "%(asctime)s %(message)s", datefmt=date_format, style="%"
         )
         panel_handler.setFormatter(panel_formatter)
 
@@ -270,7 +331,7 @@ class WorkerLoggingManager:
     def _get_file_handler(self, filename: str) -> logging.FileHandler:
         """Create a file handler for worker logs."""
         file_log_format = "{levelname:<8} {asctime} - {name}:{funcName} - {message}"
-        date_format = "%Y-%m-%d %H:%M:%S.%f"
+        date_format = DATE_FORMAT
 
         # Determine log file path
         if self.log_dir:
@@ -279,7 +340,7 @@ class WorkerLoggingManager:
         else:
             log_file = filename
 
-        file_handler = logging.FileHandler(log_file)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_formatter = logging.Formatter(
             file_log_format, datefmt=date_format, style="{"
         )

@@ -301,6 +301,10 @@ class RichLiveDashboard:
     def calculate_time_based_progress(self) -> float:
         assert self.start_time is not None and self.run_time is not None
         time_elapsed = time.monotonic() - self.start_time
+        # run_time is a user supplied duration; a zero value would otherwise
+        # raise ZeroDivisionError while rendering the dashboard.
+        if not self.run_time:
+            return 100.0
         return min(time_elapsed / self.run_time, 1) * 100
 
     def handle_single_request(
@@ -314,8 +318,12 @@ class RichLiveDashboard:
 
         # Calculate request-based progress
         assert self.max_requests_per_run is not None
+        # max_requests_per_run is a user supplied limit; a zero value would
+        # otherwise raise ZeroDivisionError while rendering the dashboard.
         request_based_progress = (
             min(total_requests / self.max_requests_per_run, 1) * 100
+            if self.max_requests_per_run
+            else 100.0
         )
 
         # Use the larger of the two progress metrics to be more accurate

@@ -2,6 +2,7 @@
 
 from unittest.mock import MagicMock, patch
 
+import oci
 import pytest
 
 from genai_bench.auth.factory import AuthFactory
@@ -87,8 +88,11 @@ class TestAuthFactory:
 
         result = AuthFactory.create_oci_auth("user_principal")
 
-        # The factory uses hardcoded defaults
+        # The factory forwards oci.config.DEFAULT_LOCATION, which expands the
+        # path with the platform separator ("~/.oci/config" on POSIX,
+        # "~\\.oci\\config" on Windows), so compare against the SDK constant
+        # rather than a hardcoded POSIX string.
         mock_auth.assert_called_once_with(
-            config_path="~/.oci/config", profile="DEFAULT"
+            config_path=oci.config.DEFAULT_LOCATION, profile="DEFAULT"
         )
         assert result == mock_instance

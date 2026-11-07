@@ -1,6 +1,6 @@
 import json
 import time
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -97,10 +97,14 @@ class AggregatedMetricsCollector:
 
         # filter silently for short output latency
         # Don't filter for non-streaming tasks where tpot=0 is intentional
-        # (e.g., embeddings, image generation set by _reset_output_metrics)
+        # (e.g., embeddings, image generation set by _reset_output_metrics).
+        # `tpot is not None` matters: a single-token response leaves tpot as
+        # None on purpose, and `None != 0` used to be True, so those requests
+        # logged "Metric may have abnormal inference speed: None tokens/s".
         if (
             metrics.output_latency is not None
             and metrics.output_latency < 0.001
+            and metrics.tpot is not None
             and metrics.tpot != 0
         ):
             logger.warning(
@@ -175,26 +179,49 @@ class AggregatedMetricsCollector:
             if key not in {"error_code", "error_message"}
         ]
 
+        num_collected_requests = len(self.all_request_metrics)
+
         warmup_number = 0
         if warmup_ratio:
-            warmup_number = int(len(self.all_request_metrics) * warmup_ratio)
+            warmup_number = int(num_collected_requests * warmup_ratio)
             logger.info(
-                f"Filtering out first {warmup_number}/{len(self.all_request_metrics)} "
+                f"Filtering out first {warmup_number}/{num_collected_requests} "
                 f"warmup requests."
             )
 
         cooldown_number = 0
         if cooldown_ratio:
-            cooldown_number = int(len(self.all_request_metrics) * cooldown_ratio)
+            cooldown_number = int(num_collected_requests * cooldown_ratio)
             logger.info(
-                f"Filtering out last {cooldown_number}/{len(self.all_request_metrics)} "
+                f"Filtering out last {cooldown_number}/{num_collected_requests} "
                 f"cooldown requests."
             )
+
+        # Requests that survive the warmup/cooldown trimming. This window is used
+        # both for the statistics below and for the duration that throughput and
+        # RPS are divided by, so the numerator (token sums) and the denominator
+        # (duration) always cover the same portion of the run.
+        aggregated_requests = self.all_request_metrics[
+            warmup_number : num_collected_requests - cooldown_number
+        ]
+        first_aggregated_index = warmup_number
+        if not aggregated_requests:
+            logger.warning(
+                "‼️ Warmup and cooldown ratios filtered out all collected "
+                "requests. Skipping collecting aggregated metrics for this run."
+            )
+            return
+
+        # Metrics that ended up without a single usable sample in the window.
+        # Reported once at the end of the loop instead of one warning per key.
+        empty_metrics: List[str] = []
 
         for key in filtered_keys:
             # Extract the list of values for this metric from all requests
             values: List[float] = []
-            for i, metrics in enumerate(self.all_request_metrics):
+            for i, metrics in enumerate(
+                aggregated_requests, start=first_aggregated_index
+            ):
                 # Skip adding the value when the request metric has error
                 if metrics.error_code:
                     continue
@@ -202,16 +229,20 @@ class AggregatedMetricsCollector:
                 if value is None:
                     logger.info(f"{i}th request has NoneType value in metric {key}.")
                     continue
-                if warmup_number <= i < len(self.all_request_metrics) - cooldown_number:
-                    values.append(value)
+                values.append(value)
 
             # Validate that all values are valid for processing
             if not values:
                 if key in RequestLevelMetrics.AUDIO_METRICS_FIELDS:
                     continue
-                raise ValueError(
-                    f"No values found for metric '{key}'. This should never happen!"
-                )
+                # Every request in the aggregation window failed (or the metric
+                # is undefined for all of them, e.g. tpot for single-token
+                # responses). A run where the server returned nothing but
+                # errors is a legitimate -- and important -- result: it must be
+                # reported through error_rate instead of crashing the whole
+                # benchmark, so leave this metric's stats empty.
+                empty_metrics.append(key)
+                continue
 
             percentiles = np.percentile(values, [25, 50, 75, 90, 95, 99])
             stat_field = getattr(self.aggregated_metrics.stats, key)
@@ -227,8 +258,16 @@ class AggregatedMetricsCollector:
             stat_field.p95 = percentiles[4].item()
             stat_field.p99 = percentiles[5].item()
 
-        # Calculate additional metadata based on aggregated data
-        self.aggregated_metrics.run_duration = end_time - start_time
+        # The warmup/cooldown ratios are applied over the collected requests, so
+        # the time window has to be trimmed in the same way before it is used as
+        # the denominator of throughput and RPS. Requests are assumed to complete
+        # at a roughly constant rate, which is the same assumption the request
+        # count based trimming above already relies on.
+        full_run_duration = end_time - start_time
+        aggregated_duration = full_run_duration * (
+            len(aggregated_requests) / num_collected_requests
+        )
+        self.aggregated_metrics.run_duration = aggregated_duration
 
         # Handle None values safely
         num_output_tokens_sum = self.aggregated_metrics.stats.num_output_tokens.sum or 0
@@ -236,21 +275,42 @@ class AggregatedMetricsCollector:
         total_tokens_sum = self.aggregated_metrics.stats.total_tokens.sum or 0
 
         self.aggregated_metrics.mean_output_throughput_tokens_per_s = (
-            num_output_tokens_sum / self.aggregated_metrics.run_duration
+            num_output_tokens_sum / aggregated_duration
+            if aggregated_duration > 0
+            else 0
         )
 
         self.aggregated_metrics.mean_input_throughput_tokens_per_s = (
-            num_input_tokens_sum / self.aggregated_metrics.run_duration
+            num_input_tokens_sum / aggregated_duration if aggregated_duration > 0 else 0
         )
 
         self.aggregated_metrics.mean_total_tokens_throughput_tokens_per_s = (
-            total_tokens_sum / self.aggregated_metrics.run_duration
+            total_tokens_sum / aggregated_duration if aggregated_duration > 0 else 0
         )
 
-        # Calculate error rate
-        self.aggregated_metrics.num_error_requests = sum(
-            self.aggregated_metrics.error_codes_frequency.values()
+        # Only the requests inside the warmup/cooldown window are reported, so the
+        # request counters are recomputed for that window as well instead of
+        # keeping the totals collected over the whole run.
+        window_error_codes: Dict[int, int] = {}
+        window_completed_requests = 0
+        for metrics in aggregated_requests:
+            if metrics.error_code:
+                window_error_codes[metrics.error_code] = (
+                    window_error_codes.get(metrics.error_code, 0) + 1
+                )
+            else:
+                window_completed_requests += 1
+
+        self.aggregated_metrics.error_codes_frequency = window_error_codes
+        self.aggregated_metrics.num_completed_requests = window_completed_requests
+        self.aggregated_metrics.num_error_requests = sum(window_error_codes.values())
+        self.aggregated_metrics.num_requests = (
+            self.aggregated_metrics.num_completed_requests
+            + self.aggregated_metrics.num_error_requests
         )
+
+        # Calculate error rate. num_requests has to be known before it is used
+        # as the denominator, otherwise this is always 0.
         self.aggregated_metrics.error_rate = (
             self.aggregated_metrics.num_error_requests
             / self.aggregated_metrics.num_requests
@@ -265,19 +325,21 @@ class AggregatedMetricsCollector:
                 f"check logs from genai-bench and server!"
             )
 
-        # Calculate requests per minute
+        # Calculate requests per second over the same trimmed window
         self.aggregated_metrics.requests_per_second = (
-            (
-                self.aggregated_metrics.num_completed_requests
-                / self.aggregated_metrics.run_duration
-            )
-            if self.aggregated_metrics.run_duration > 0
+            (self.aggregated_metrics.num_completed_requests / aggregated_duration)
+            if aggregated_duration > 0
             else 0
         )
-        self.aggregated_metrics.num_requests = (
-            self.aggregated_metrics.num_completed_requests
-            + self.aggregated_metrics.num_error_requests
-        )
+
+        if empty_metrics:
+            logger.warning(
+                f"‼️ No values found for these metrics in the aggregation "
+                f"window: {', '.join(empty_metrics)}. Their statistics are left "
+                f"empty for this run, which happens when every request failed "
+                f"or when the metric is undefined for all of them (e.g. tpot "
+                f"for single-token responses)."
+            )
 
     def set_run_metadata(
         self,
@@ -285,9 +347,20 @@ class AggregatedMetricsCollector:
         scenario_str: str,
         metrics_refresh_interval: Optional[float] = None,
         iteration_type: str = "num_concurrency",
+        num_concurrency: Optional[int] = None,
     ):
-        """Set metadata for the current run"""
+        """
+        Set metadata for the current run.
+
+        ``iteration`` is the value of the *varying* dimension named by
+        ``iteration_type``; the other dimension keeps its own value. For
+        batch_size iteration the concurrent user count is fixed for the whole
+        series, so ``num_concurrency`` records what was actually used instead
+        of leaving the field at its default.
+        """
         setattr(self.aggregated_metrics, iteration_type, iteration)
+        if iteration_type == "batch_size" and num_concurrency:
+            self.aggregated_metrics.num_concurrency = int(num_concurrency)
         self.aggregated_metrics.scenario = scenario_str
         self.aggregated_metrics.iteration_type = iteration_type
         if metrics_refresh_interval is not None:
@@ -316,6 +389,14 @@ class AggregatedMetricsCollector:
 
     def save(self, file_path: str, metrics_time_unit: str = "s"):
         if not self.all_request_metrics:
+            # Returning silently left the experiment folder without any result
+            # file, which the report tooling later reported as "no run data".
+            logger.warning(
+                f"‼️ No request metrics were collected for this run, so "
+                f"{file_path} was not written. This happens when no request "
+                f"completed (for example because --warmup-ratio/--cooldown-ratio "
+                f"filtered out every request, or the run was too short)."
+            )
             return
 
         # Convert aggregated metrics to the specified time unit
@@ -338,8 +419,15 @@ class AggregatedMetricsCollector:
             json.dump(data_to_save, metrics_file, indent=4)
 
     def get_live_metrics(self) -> LiveMetricsData:
-        """Returns the latest live metrics for use in the UI."""
-        return self._live_metrics_data
+        """Returns the latest live metrics for use in the UI.
+
+        The lists are copied so the caller cannot mutate the live state that
+        the request handlers keep appending to.
+        """
+        return {
+            metric: list(values) if isinstance(values, list) else dict(values)
+            for metric, values in self._live_metrics_data.items()
+        }
 
     def get_ui_scatter_plot_metrics(
         self, metrics_time_unit: str = "s"

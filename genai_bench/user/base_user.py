@@ -58,13 +58,37 @@ class BaseUser(HttpUser):
         """
         request_metrics_collector = RequestMetricsCollector()
         if user_response.status_code == 200:
-            request_metrics_collector.calculate_metrics(user_response)
-            self.environment.events.request.fire(
-                request_type="POST",
-                name=endpoint,
-                response_time=request_metrics_collector.metrics.e2e_latency,
-                response_length=request_metrics_collector.metrics.num_output_tokens,
-            )
+            # calculate_metrics validates the response (asserts on missing
+            # fields) and parses it; a malformed but 200 response (e.g. an
+            # empty stream with no usage chunk) used to raise out of
+            # collect_metrics before the request event was fired and before
+            # the metrics were sent. Locust never saw the request at all and
+            # the greenlet died, silently lowering concurrency for the rest of
+            # the run. Report it as a failed request instead.
+            try:
+                request_metrics_collector.calculate_metrics(user_response)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to collect metrics from a successful response: {e}"
+                )
+                request_metrics_collector.metrics.error_code = 200
+                request_metrics_collector.metrics.error_message = (
+                    f"Failed to collect metrics from response: {e}"
+                )
+                self.environment.events.request.fire(
+                    request_type="POST",
+                    name=endpoint,
+                    response_time=None,
+                    response_length=0,
+                    exception=f"Failed to collect metrics from response: {e}",
+                )
+            else:
+                self.environment.events.request.fire(
+                    request_type="POST",
+                    name=endpoint,
+                    response_time=request_metrics_collector.metrics.e2e_latency,
+                    response_length=request_metrics_collector.metrics.num_output_tokens,
+                )
         else:
             # Handle error responses
             request_metrics_collector.metrics.error_code = user_response.status_code
@@ -74,7 +98,11 @@ class BaseUser(HttpUser):
             self.environment.events.request.fire(
                 request_type="POST",
                 name=endpoint,
-                response_time=0,
+                # None rather than 0: Locust counts a None response_time in
+                # num_none_requests and skips it for latency statistics,
+                # whereas 0 is recorded as a real sample that drags min/mean
+                # and every percentile of the run towards zero.
+                response_time=None,
                 response_length=0,
                 exception=f"Request failed with "
                 f"status {user_response.status_code}, "

@@ -57,11 +57,25 @@ class OSDataStore(DataStore):
             source.namespace = namespace
             logger.debug(f"Using namespace: {namespace}")
 
-        response = self.get_object(source)
-        with open(target, "wb") as f:
-            for chunk in response.data.raw.stream(1024 * 1024, decode_content=False):
-                f.write(chunk)
-        logger.info(f"Successfully downloaded {source} to {target}")
+        # The retries argument was accepted but never used, so a transient
+        # failure aborted the whole upload/download.
+        attempts = max(int(retries or 1), 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                response = self.get_object(source)
+                with open(target, "wb") as f:
+                    for chunk in response.data.raw.stream(
+                        1024 * 1024, decode_content=False
+                    ):
+                        f.write(chunk)
+                logger.info(f"Successfully downloaded {source} to {target}")
+                return
+            except Exception as e:
+                if attempt >= attempts:
+                    raise
+                logger.warning(
+                    f"Download of {source} failed (attempt {attempt}/{attempts}): {e}"
+                )
 
     def get_object(self, source: ObjectURI) -> Any:
         """Get an object from OCI Object Storage.
@@ -116,9 +130,18 @@ class OSDataStore(DataStore):
             kwargs["prefix"] = uri.prefix
             logger.debug(f"Using prefix filter: {uri.prefix}")
 
-        response = self.client.list_objects(**kwargs)
-        for obj in response.data.objects:
-            yield obj.name
+        # OCI returns at most ~1000 objects per page; without following
+        # `next_start_with` a bucket holding more objects was silently
+        # truncated, so uploads/migrations appeared to have finished early.
+        while True:
+            response = self.client.list_objects(**kwargs)
+            for obj in response.data.objects:
+                yield obj.name
+
+            next_start_with = getattr(response.data, "next_start_with", None)
+            if not next_start_with:
+                break
+            kwargs["start"] = next_start_with
 
     def get_namespace(self) -> str:
         """Get the namespace for the current compartment.
@@ -147,18 +170,31 @@ class OSDataStore(DataStore):
             logger.debug(f"Using namespace: {namespace}")
 
         file_size = os.path.getsize(source)
-        if file_size > 128 * MB:  # Use multipart upload for files larger than 128MB
-            logger.info(
-                f"Using multipart upload for {source} ({file_size / MB:.2f} MB)"
-            )
-            self.multipart_upload(source, target)
-        else:
-            logger.info(
-                f"Using single-part upload for {source} ({file_size / MB:.2f} MB)"
-            )
-            with open(source, "rb") as f:
-                self.put_object(target, f)
-        logger.info(f"Successfully uploaded {source} to {target}")
+        attempts = max(int(retries or 1), 1)
+        for attempt in range(1, attempts + 1):
+            try:
+                if file_size > 128 * MB:
+                    # Use multipart upload for files larger than 128MB
+                    logger.info(
+                        f"Using multipart upload for {source} "
+                        f"({file_size / MB:.2f} MB)"
+                    )
+                    self.multipart_upload(source, target)
+                else:
+                    logger.info(
+                        f"Using single-part upload for {source} "
+                        f"({file_size / MB:.2f} MB)"
+                    )
+                    with open(source, "rb") as f:
+                        self.put_object(target, f)
+                logger.info(f"Successfully uploaded {source} to {target}")
+                return
+            except Exception as e:
+                if attempt >= attempts:
+                    raise
+                logger.warning(
+                    f"Upload of {source} failed (attempt {attempt}/{attempts}): {e}"
+                )
 
     def multipart_upload(
         self,
@@ -191,7 +227,11 @@ class OSDataStore(DataStore):
             **kwargs,
         )
 
-        if response.status != 200:
+        # oci.response.Response.status is a string ("200"), so comparing it to
+        # the int literal 200 was always True and turned every successful
+        # multipart upload into an exception. Compare on the normalised string
+        # so both the SDK value and any int-derived mock behave correctly.
+        if str(response.status) != "200":
             raise Exception(f"Multipart upload failed: {response.data.error_message}")
         logger.info(f"Successfully completed multipart upload for {source}")
 
@@ -217,9 +257,10 @@ class OSDataStore(DataStore):
         # Upload all files in the folder
         for file_path in folder_path.glob("**/*"):
             if file_path.is_file():
-                # Create object name with prefix
-                rel_path = file_path.relative_to(folder_path)
-                object_name = str(Path(prefix) / rel_path) if prefix else str(rel_path)
+                # Object names always use "/" separators, so that the layout
+                # written on Windows matches the one written on Linux.
+                rel_path = file_path.relative_to(folder_path).as_posix()
+                object_name = f"{prefix}/{rel_path}" if prefix else rel_path
 
                 target = ObjectURI(
                     namespace=namespace,

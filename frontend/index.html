@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>genai-bench · 单人版</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand" onclick="GB.go('/#/new')">
+        <span class="logo">GB</span>
+        <span class="brand-name">genai-bench <em>单人版</em></span>
+      </div>
+      <nav class="nav">
+        <a data-nav="new" href="/#/new">新建实验</a>
+        <a data-nav="history" href="/#/history">历史结果</a>
+        <a data-nav="dashboard" href="/#/dashboard">实时监控</a>
+      </nav>
+      <div class="topbar-right">
+        <span id="queue-pill" class="pill" title="串行队列"></span>
+        <span id="health-dot" class="dot" title="服务状态"></span>
+      </div>
+    </header>
+
+    <main id="view"></main>
+
+    <div id="toast" class="toast" aria-live="polite"></div>
+    <div id="modal-root"></div>
+  </div>
+  <script src="/static/chart.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

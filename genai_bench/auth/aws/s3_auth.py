@@ -31,6 +31,9 @@ class AWSS3Auth(StorageAuthProvider):
         self.session_token = session_token or os.getenv("AWS_SESSION_TOKEN")
         # Store original region to track if it was explicitly set
         self._explicit_region = region
+        # Keep the resolved value separate from the fallback: boto3 picks the
+        # real region from its own chain, so reporting "us-east-1" as if it
+        # were the configured region was misleading.
         self.region = region or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
         self.profile = profile or os.getenv("AWS_PROFILE")
 
@@ -64,11 +67,18 @@ class AWSS3Auth(StorageAuthProvider):
         Returns:
             Dict with AWS credentials
         """
+        # `region_name` is omitted unless the region was actually configured:
+        # the "us-east-1" default above is a placeholder, not a user choice.
+        if self._explicit_region or os.getenv("AWS_DEFAULT_REGION"):
+            region_name: Optional[str] = self.region
+        else:
+            region_name = None
+
         return {
             "aws_access_key_id": self.access_key_id,
             "aws_secret_access_key": self.secret_access_key,
             "aws_session_token": self.session_token,
-            "region_name": self.region,
+            "region_name": region_name,
             "profile_name": self.profile,
         }
 

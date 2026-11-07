@@ -1,5 +1,7 @@
 from locust.env import Environment
 
+import time
+
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -34,11 +36,17 @@ def manage_run_time(
         int: The actual run time in seconds.
     """
 
-    total_run_time = 0
+    # Track wall-clock time, not the number of loop iterations: gevent.sleep(1)
+    # is a lower bound, so under load the loop ticked slower than a second and
+    # the value returned here (written into the run file name as time_<n>s)
+    # understated the real duration of the run.
+    started_at = time.monotonic()
+    elapsed = 0.0
 
-    while total_run_time < max_time_per_run:
+    while True:
         gevent.sleep(1)
-        total_run_time += 1
+
+        elapsed = time.monotonic() - started_at
 
         assert environment.runner is not None, "environment.runner should not be None"
         total_completed_requests = environment.runner.stats.total.num_requests
@@ -50,7 +58,10 @@ def manage_run_time(
             )
             break
 
-    return int(total_run_time)
+        if elapsed >= max_time_per_run:
+            break
+
+    return int(elapsed)
 
 
 def get_experiment_path(
@@ -108,11 +119,18 @@ def get_experiment_path(
     return experiment_path
 
 
-def get_run_params(iteration_type: str, iteration_value: int) -> Tuple[str, int, int]:
+def get_run_params(
+    iteration_type: str, iteration_value: int, fixed_concurrency: int = 1
+) -> Tuple[str, int, int]:
     """
-    Returns appropriate header, batch_size, and num_concurrency based on iteration_type
-    and iteration_value.
+    Returns appropriate header, batch_size, and num_concurrency based on
+    iteration_type and iteration_value.
+
+    ``fixed_concurrency`` only applies to ``batch_size`` iteration, where the
+    varying dimension is the batch size and the number of concurrent locust
+    users stays constant for the whole series. It defaults to 1 (the
+    historical behaviour) and is 1 unless the caller asked for more.
     """
     if iteration_type == "batch_size":
-        return "Batch Size", iteration_value, 1
+        return "Batch Size", iteration_value, max(1, int(fixed_concurrency or 1))
     return "Concurrency", 1, iteration_value

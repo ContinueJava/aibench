@@ -16,6 +16,29 @@ def sanitize_string(input_str: str):
     )
 
 
+# Parameter names whose values are credentials. They must never appear in the
+# reconstructed command line (written to experiment_metadata.json) or in the
+# "Options you provided:" log block. The CLI accepts the same secrets through
+# environment variables, so hiding them here does not change behaviour.
+SENSITIVE_PARAMS: frozenset[str] = frozenset(
+    {
+        "api_key",
+        "model_api_key",
+        "azure_ad_token",
+        "aws_secret_access_key",
+        "aws_session_token",
+        "security_token",
+        "storage_aws_secret_access_key",
+        "storage_aws_session_token",
+        "storage_azure_account_key",
+        "storage_azure_connection_string",
+        "storage_azure_sas_token",
+        "storage_gcp_credentials_path",
+        "github_token",
+    }
+)
+
+
 def is_single_experiment_folder(folder_name: str) -> bool:
     """
     Checks whether the folder contains only one experiment by inspecting

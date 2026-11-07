@@ -200,9 +200,9 @@ class TestOCIOBOTokenAuth:
         assert auth.region == MOCK_REGION
         assert auth._signer is None
 
-    @patch("oci.auth.signers.SecurityTokenSigner")
+    @patch("oci.auth.signers.InstancePrincipalsDelegationTokenSigner")
     def test_get_credentials(self, mock_signer_class):
-        """Test getting security token signer."""
+        """Test getting OBO delegation token signer."""
         mock_signer = MockOCISigner()
         mock_signer_class.return_value = mock_signer
 
@@ -210,7 +210,7 @@ class TestOCIOBOTokenAuth:
         signer = auth.get_credentials()
 
         assert signer == mock_signer
-        mock_signer_class.assert_called_once_with(MOCK_TOKEN, region=MOCK_REGION)
+        mock_signer_class.assert_called_once_with(delegation_token=MOCK_TOKEN)
 
         # Second call should use cached signer
         signer = auth.get_credentials()

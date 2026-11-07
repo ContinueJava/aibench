@@ -178,12 +178,25 @@ class ImageSampler(Sampler):
                 continue
 
             if raw_image is None:
+                logger.warning(
+                    "Skipping a dataset row for an image request: it has no "
+                    "image for the configured image column."
+                )
                 continue
             processed_image = ImageSampler.process_image(
                 raw_image, resize=image_dimension
             )
             images.append(processed_image)
             texts.append(prompt or "")
+
+        if not images:
+            # Returning an empty list used to send a text-only request while
+            # still being reported as an image scenario.
+            raise ValueError(
+                "Could not sample any image from the dataset: every selected "
+                "row was missing an image. Check --dataset-path and the image "
+                "column configuration, or use a dataset that contains images."
+            )
 
         return " ".join(texts), images
 

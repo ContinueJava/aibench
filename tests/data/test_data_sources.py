@@ -248,6 +248,62 @@ class TestCustomDatasetSource:
             source.load()
 
 
+class TestTextDatasetLoaderRecordList:
+    """A JSON file may hold records instead of plain strings."""
+
+    @staticmethod
+    def _write_json(payload):
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, encoding="utf-8"
+        ) as f:
+            json.dump(payload, f)
+            return f.name
+
+    def _loader(self, path, prompt_column=None):
+        from genai_bench.data.config import DatasetConfig
+        from genai_bench.data.loaders.text import TextDatasetLoader
+
+        config = DatasetConfig(
+            source=DatasetSourceConfig(type="file", path=path, file_format="json"),
+            prompt_column=prompt_column,
+        )
+        return TextDatasetLoader(config)
+
+    def test_record_list_extracts_prompt_column(self):
+        """Objects in a JSON list are read through the prompt column."""
+        path = self._write_json([{"text": "First"}, {"text": "Second"}])
+        try:
+            assert self._loader(path, "text").load_request() == ["First", "Second"]
+        finally:
+            Path(path).unlink()
+
+    def test_record_list_without_prompt_column_reports_columns(self):
+        """Without a column the loader explains what is available."""
+        path = self._write_json([{"text": "First"}])
+        try:
+            with pytest.raises(ValueError, match="Available columns: \\['text'\\]"):
+                self._loader(path).load_request()
+        finally:
+            Path(path).unlink()
+
+    def test_record_list_with_unknown_column_reports_columns(self):
+        """An unknown column name is reported with the available columns."""
+        path = self._write_json([{"text": "First"}])
+        try:
+            with pytest.raises(ValueError, match="Column 'missing' not found"):
+                self._loader(path, "missing").load_request()
+        finally:
+            Path(path).unlink()
+
+    def test_plain_string_list_is_returned_as_is(self):
+        """A list of plain strings stays the prompt list."""
+        path = self._write_json(["plain one", "plain two"])
+        try:
+            assert self._loader(path).load_request() == ["plain one", "plain two"]
+        finally:
+            Path(path).unlink()
+
+
 class TestDatasetSourceFactory:
     """Test DatasetSourceFactory implementation."""
 

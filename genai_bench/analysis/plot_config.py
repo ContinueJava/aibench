@@ -1,5 +1,6 @@
 """Plot configuration system for flexible, user-defined plots."""
 
+import copy
 import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -499,8 +500,11 @@ class PlotConfigManager:
         if metrics_time_unit not in ["s", "ms"]:
             return config_data
 
-        # Create a copy to avoid modifying the original
-        config_copy = config_data.copy()
+        # Deep copy: `dict.copy()` is shallow, so the nested plot specs were
+        # rewritten in place and the built-in PRESETS kept the converted labels
+        # (e.g. "TTFT (ms)") for every later load, including loads asking for
+        # seconds again.
+        config_copy = copy.deepcopy(config_data)
 
         # Convert labels in each plot specification
         for plot_copy in config_copy.get("plots", []):

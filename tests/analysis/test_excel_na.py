@@ -1,9 +1,13 @@
 import os
 import tempfile
 
+import pytest
 from openpyxl import load_workbook
 
-from genai_bench.analysis.excel_report import create_workbook
+from genai_bench.analysis.excel_report import (
+    create_workbook,
+    is_within_relative_difference,
+)
 from genai_bench.metrics.metrics import AggregatedMetrics, MetricStats, StatField
 from genai_bench.protocol import ExperimentMetadata
 
@@ -191,3 +195,93 @@ def test_time_unit_conversion_milliseconds_to_seconds():
         assert e2e_latency_value == 1, (
             f"Expected e2e_latency value 1s, got: {e2e_latency_value}"
         )
+
+
+def test_create_workbook_with_empty_run_data_raises_clear_error():
+    """An empty run_data must be reported by name, not crash deep inside."""
+    metadata = _make_metadata(["D(100,100)"])
+    with tempfile.TemporaryDirectory() as td:
+        out_path = os.path.join(td, "empty.xlsx")
+        with pytest.raises(ValueError, match="run_data is empty"):
+            create_workbook(metadata, {}, out_path)
+
+
+def test_create_workbook_with_none_metadata_raises_clear_error():
+    """A missing metadata file must be reported by name, not AttributeError."""
+    with tempfile.TemporaryDirectory() as td:
+        out_path = os.path.join(td, "none.xlsx")
+        with pytest.raises(ValueError, match="experiment_metadata is None"):
+            create_workbook(None, {}, out_path)
+
+
+def test_create_workbook_when_iteration_has_no_individual_request_metrics():
+    """A run file without per-request metrics must not break the merge ranges.
+
+    Merging an empty range used to raise
+    "ValueError: 1 must be greater than 2" from openpyxl.
+    """
+    scenario = "D(100,100)"
+    metadata = _make_metadata([scenario])
+    run_data = {
+        scenario: {
+            1: {
+                "aggregated_metrics": _agg_metrics(
+                    scenario, 1, output_infer_speed_mean=15.0
+                ),
+                "individual_request_metrics": [],
+            }
+        }
+    }
+
+    with tempfile.TemporaryDirectory() as td:
+        out_path = os.path.join(td, "no_per_request.xlsx")
+        create_workbook(metadata, run_data, out_path, percentile="mean")
+        assert os.path.exists(out_path)
+
+
+def test_create_workbook_with_scenario_missing_from_run_data():
+    """A scenario with no run data must not crash the Appendix sheet.
+
+    The GPU Type column merge must be skipped when there is no data row.
+    """
+    scenario_with_data = "D(100,100)"
+    scenario_without_data = "D(2000,200)"
+    metadata = _make_metadata([scenario_with_data, scenario_without_data])
+    run_data = {
+        scenario_with_data: {
+            1: {
+                "aggregated_metrics": _agg_metrics(
+                    scenario_with_data, 1, output_infer_speed_mean=15.0
+                ),
+                "individual_request_metrics": [{}],
+            }
+        }
+    }
+
+    with tempfile.TemporaryDirectory() as td:
+        out_path = os.path.join(td, "missing_scenario.xlsx")
+        create_workbook(metadata, run_data, out_path, percentile="mean")
+        assert os.path.exists(out_path)
+
+
+def test_is_within_relative_difference_handles_zero_previous_metrics():
+    """A zero baseline cannot be compared against and must not divide by zero."""
+    scenario = "D(100,100)"
+    current = _agg_metrics(scenario, 2, output_infer_speed_mean=15.0)
+    current.mean_total_tokens_throughput_tokens_per_s = 100.0
+    current.requests_per_second = 10.0
+
+    zero_throughput = _agg_metrics(scenario, 1, output_infer_speed_mean=15.0)
+    zero_throughput.mean_total_tokens_throughput_tokens_per_s = 0.0
+    zero_throughput.requests_per_second = 10.0
+    assert is_within_relative_difference(current, zero_throughput) is False
+
+    zero_rps = _agg_metrics(scenario, 1, output_infer_speed_mean=15.0)
+    zero_rps.mean_total_tokens_throughput_tokens_per_s = 100.0
+    zero_rps.requests_per_second = 0.0
+    assert is_within_relative_difference(current, zero_rps) is False
+
+    close_enough = _agg_metrics(scenario, 1, output_infer_speed_mean=15.0)
+    close_enough.mean_total_tokens_throughput_tokens_per_s = 100.0
+    close_enough.requests_per_second = 10.0
+    assert is_within_relative_difference(current, close_enough) is True

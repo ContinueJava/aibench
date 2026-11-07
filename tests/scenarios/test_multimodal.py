@@ -87,3 +87,18 @@ def test_image_modality_from_string():
     scenario = Scenario.from_string("I(512,512,3)")
     assert isinstance(scenario, ImageModality)
     assert scenario.num_input_images == 3
+
+
+def test_image_modality_rejects_zero_images():
+    """I(w,h,0) used to be accepted and produced image-less requests."""
+    import pytest
+
+    with pytest.raises(ValueError, match="num_input_images \\(0\\) must be >= 1"):
+        ImageModality.parse("(256,256,0)")
+
+    with pytest.raises(ValueError, match="must be >= 1"):
+        ImageModality(
+            num_input_dimension_width=256,
+            num_input_dimension_height=256,
+            num_input_images=0,
+        )

@@ -48,6 +48,13 @@ class ImageModality(Scenario):
         num_input_images: int = 1,
         max_output_token: Optional[int] = None,
     ):
+        # I(w,h,0) used to be accepted and then produced requests with no image
+        # at all, so the request no longer measured image handling.
+        if num_input_images < 1:
+            raise ValueError(
+                f"Invalid image scenario I: num_input_images ({num_input_images}) "
+                f"must be >= 1. Omit the third argument to send a single image."
+            )
         self.num_input_dimension_width = num_input_dimension_width
         self.num_input_dimension_height = num_input_dimension_height
         self.num_input_images = num_input_images

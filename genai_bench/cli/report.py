@@ -1,18 +1,31 @@
 """CLI for reports related commands."""
 
+import importlib.util
 import os
 
 import click
 
-from genai_bench.analysis.excel_report import create_workbook
 from genai_bench.analysis.experiment_loader import (
     load_multiple_experiments,
     load_one_experiment,
 )
-from genai_bench.analysis.plot_report import plot_experiment_data
 from genai_bench.cli.validation import validate_filter_criteria
 from genai_bench.logging import LoggingManager, init_logger
 from genai_bench.utils import is_single_experiment_folder
+
+
+def _require(name: str, pkg: str) -> None:
+    """Exit with an install hint when a report dependency is missing.
+
+    `matplotlib` / `openpyxl` are core dependencies, but installing with
+    `--no-deps` (or into a stripped image) can leave them out; the reporting
+    commands should then say what to install instead of raising ImportError.
+    """
+    if importlib.util.find_spec(pkg) is None:
+        raise SystemExit(
+            f"Error: '{name}' needs '{pkg}', which is not installed.\n"
+            f"Install it with:  pip install {pkg}"
+        )
 
 
 @click.command()
@@ -48,10 +61,34 @@ def excel(ctx, experiment_folder, excel_name, metric_percentile, metrics_time_un
     """
     Exports the experiment results to an Excel file.
     """
+    _require("genai-bench excel", "openpyxl")
+    from genai_bench.analysis.excel_report import create_workbook
+
     LoggingManager("excel")
-    _ = init_logger("genai_bench.excel")
+    logger = init_logger("genai_bench.excel")
     excel_path = os.path.join(experiment_folder, excel_name + ".xlsx")
     experiment_metadata, run_data = load_one_experiment(experiment_folder)
+    # load_one_experiment returns (None, {}) when the folder has no
+    # experiment_metadata.json (or when it is filtered out). create_workbook
+    # dereferences it immediately, which used to crash with a bare
+    # AttributeError instead of telling the user what is missing.
+    if not experiment_metadata:
+        logger.error(
+            f"No experiment_metadata.json found in {experiment_folder}. "
+            f"Please point --experiment-folder at a benchmark output folder."
+        )
+        raise click.ClickException(
+            f"No experiment_metadata.json found in {experiment_folder}."
+        )
+    if not run_data:
+        logger.error(
+            f"No run data found in {experiment_folder} "
+            f"(looked for *_concurrency_<n>_time_<n>s.json). "
+            f"The benchmark may have produced no completed requests."
+        )
+        raise click.ClickException(
+            f"No run data found in {experiment_folder}; nothing to export."
+        )
     create_workbook(
         experiment_metadata, run_data, excel_path, metric_percentile, metrics_time_unit
     )
@@ -143,6 +180,9 @@ def plot(
     Plots the experiment(s) results based on filters and group.
     Supports flexible plot configurations via JSON files or built-in presets.
     """
+    if not list_fields:
+        _require("genai-bench plot", "matplotlib")
+        _require("genai-bench plot", "openpyxl")
     LoggingManager("plot")
     logger = init_logger("genai_bench.plot")
 
@@ -243,8 +283,11 @@ def plot(
             logger.info("Using default 2x4 configuration")
 
     except Exception as e:
+        # Returning normally made `genai-bench plot --plot-config /bad/path`
+        # exit 0 after only logging, so a broken config looked like success in
+        # CI pipelines. Fail loudly instead.
         logger.error(f"Error loading plot configuration: {e}")
-        return
+        raise click.ClickException(f"Error loading plot configuration: {e}") from e
 
     # Load experiment data
     logger.info(
@@ -256,16 +299,20 @@ def plot(
             experiments_folder, filter_criteria
         )
         if not experiment_metadata or not run_data:
-            logger.info(
+            logger.error(
                 f"No experiment_metadata or run_data found in {experiments_folder}"
             )
-            return
+            raise click.ClickException(
+                f"No experiment_metadata or run_data found in {experiments_folder}."
+            )
         run_data_list = [(experiment_metadata, run_data)]
     else:
         run_data_list = load_multiple_experiments(experiments_folder, filter_criteria)
         if not run_data_list:
-            logger.info("No valid experiment data found for multiple experiments.")
-            return
+            logger.error("No valid experiment data found for multiple experiments.")
+            raise click.ClickException(
+                f"No valid experiment data found in {experiments_folder}."
+            )
 
     # Validate configuration with actual data
     validation_errors = validate_plot_config_with_data(config, run_data_list)
@@ -298,6 +345,8 @@ def plot(
         logger.error(f"Error generating plots: {e}")
         # Fallback to originally plotting system
         logger.info("Falling back to original plotting system...")
+        from genai_bench.analysis.plot_report import plot_experiment_data
+
         plot_experiment_data(
             run_data_list,
             group_key=group_key,

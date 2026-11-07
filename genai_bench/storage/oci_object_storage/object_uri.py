@@ -1,6 +1,6 @@
 """OCI Object URI data class."""
 
-import os
+import posixpath
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -57,7 +57,10 @@ class ObjectURI(BaseModel):
                 path = path[2:]
                 if path:
                     object_name = path
-                    prefix = os.path.dirname(object_name)
+                    # posixpath, not os.path: object keys always use "/", and
+                    # os.path.dirname returns "dir\\" style prefixes on
+                    # Windows, which never matches the keys that were written.
+                    prefix = posixpath.dirname(object_name)
                     if prefix:
                         prefix = prefix + "/"
 

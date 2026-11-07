@@ -48,31 +48,61 @@ def create_layout():
     return layout
 
 
+def _as_stat_mapping(data) -> dict:
+    """Coerce a stats payload into a mapping of stat name -> value.
+
+    Live metrics arrive either as a dict of stats or, when a metric has no
+    samples yet, as an empty list. Normalising here keeps the panel renderer
+    free of type checks.
+    """
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _format_stat(values: dict, key: str) -> str:
+    """Format one statistic for the panel, tolerating missing samples."""
+    value = values.get(key)
+    if value is None:
+        return "N/A"
+    return f"{value:.2f}"
+
+
 def create_metric_panel(
     title, latency_data, throughput_data, metrics_time_unit: str = "s"
 ):
+    # Tolerate missing statistics: the dashboard calls this with [] when a
+    # metric has no samples yet (e.g. every request so far failed, or the
+    # latency sample arrives before the throughput one). Indexing into an
+    # empty list would crash the live UI.
+    latency_values = _as_stat_mapping(latency_data)
+    throughput_values = _as_stat_mapping(throughput_data)
+
     # Convert latency values if needed
     if metrics_time_unit == "ms":
         # Convert seconds to milliseconds
         latency_values = {
             key: value * 1000 if value is not None else value
-            for key, value in latency_data.items()
+            for key, value in latency_values.items()
         }
         time_unit_label = "ms"
     else:
-        latency_values = latency_data
         time_unit_label = "s"
 
     latency_table = Table.grid(expand=True)
     latency_table.add_column(justify="left")
     latency_table.add_row(
         Text.from_markup(
-            f"[yellow]Avg:[/yellow] {latency_values['mean']:.2f} {time_unit_label}\n"
-            f"Min: {latency_values['min']:.2f} {time_unit_label}\n"
-            f"Max: {latency_values['max']:.2f} {time_unit_label}\n"
-            f"[blue]P50:[/blue] {latency_values['p50']:.2f} {time_unit_label}\n"
-            f"[magenta]P90:[/magenta] {latency_values['p90']:.2f} {time_unit_label}\n"
-            f"[green]P99:[/green] {latency_values['p99']:.2f} {time_unit_label}",
+            f"[yellow]Avg:[/yellow] "
+            f"{_format_stat(latency_values, 'mean')} {time_unit_label}\n"
+            f"Min: {_format_stat(latency_values, 'min')} {time_unit_label}\n"
+            f"Max: {_format_stat(latency_values, 'max')} {time_unit_label}\n"
+            f"[blue]P50:[/blue] "
+            f"{_format_stat(latency_values, 'p50')} {time_unit_label}\n"
+            f"[magenta]P90:[/magenta] "
+            f"{_format_stat(latency_values, 'p90')} {time_unit_label}\n"
+            f"[green]P99:[/green] "
+            f"{_format_stat(latency_values, 'p99')} {time_unit_label}",
             justify="left",
         )
     )
@@ -81,9 +111,10 @@ def create_metric_panel(
     throughput_table.add_column(justify="left")
     throughput_table.add_row(
         Text.from_markup(
-            f"[yellow]Avg:[/yellow] {throughput_data['mean']:.2f} tokens/sec\n"
-            f"Min: {throughput_data['min']:.2f} tokens/sec\n"
-            f"Max: {throughput_data['max']:.2f} tokens/sec",
+            f"[yellow]Avg:[/yellow] "
+            f"{_format_stat(throughput_values, 'mean')} tokens/sec\n"
+            f"Min: {_format_stat(throughput_values, 'min')} tokens/sec\n"
+            f"Max: {_format_stat(throughput_values, 'max')} tokens/sec",
             justify="left",
         )
     )

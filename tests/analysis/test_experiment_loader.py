@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from unittest.mock import call, mock_open, patch
 
 import pytest
@@ -137,20 +138,27 @@ def test_load_one_experiment_with_missing_concurrency_levels(
     mock_load_run_data.assert_has_calls(
         [
             call(
-                "fake_experiment_folder/N480_240_300_150_chat_concurrency_1_time_600s.json",  # noqa: E501
+                os.path.join(
+                    "fake_experiment_folder",
+                    "N480_240_300_150_chat_concurrency_1_time_600s.json",
+                ),
                 {"N(480,240)/(300,150)": {}},
                 None,
             ),
             call(
-                "fake_experiment_folder/N480_240_300_150_chat_concurrency_4_time_600s.json",  # noqa: E501
+                os.path.join(
+                    "fake_experiment_folder",
+                    "N480_240_300_150_chat_concurrency_4_time_600s.json",
+                ),
                 {"N(480,240)/(300,150)": {}},
                 None,
             ),
         ]
     )
 
-    # Ensure that the logger warning is called for missing concurrency level
-    # (2 in this case)
+    # Every scenario missing from run_data must be warned about, including
+    # adjacent ones: removing elements from the list that is being iterated
+    # over used to skip the scenario right after each removed one.
     mock_logger_warning.assert_has_calls(
         [
             call(
@@ -158,7 +166,15 @@ def test_load_one_experiment_with_missing_concurrency_levels(
                 "Please re-run this scenario if necessary!"
             ),
             call(
+                "‼️ Scenario D(100,1000) in metadata but metrics not found! "
+                "Please re-run this scenario if necessary!"
+            ),
+            call(
                 "‼️ Scenario D(2000,200) in metadata but metrics not found! "
+                "Please re-run this scenario if necessary!"
+            ),
+            call(
+                "‼️ Scenario D(7800,200) in metadata but metrics not found! "
                 "Please re-run this scenario if necessary!"
             ),
             call(
@@ -167,6 +183,9 @@ def test_load_one_experiment_with_missing_concurrency_levels(
             ),
         ]
     )
+
+    # All scenarios without metrics must be dropped from the metadata
+    assert metadata.traffic_scenario == ["N(480,240)/(300,150)"]
 
 
 @patch(

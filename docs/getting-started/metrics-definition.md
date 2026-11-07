@@ -35,9 +35,19 @@ This metrics collection summarizes the metrics relevant to a specific traffic lo
 | Mean Input Throughput     | The average throughput of how many input tokens can be processed by the model in one run with multiple concurrent requests.  | `mean_input_throughput = sum(input_tokens_for_all_requests) / run_duration`                 | tokens/second |
 | Mean Output Throughput    | The average throughput of how many output tokens can be processed by the model in one run with multiple concurrent requests. | `mean_output_throughput = sum(output_tokens_for_all_requests) / run_duration`               | tokens/second |
 | Total Tokens Throughput   | The average throughput of how many tokens can be processed by the model, including both input and output tokens.             | `mean_total_tokens_throughput = all_requests["total_tokens"]["sum"] / run_duration`         | tokens/second |
-| Requests Per Minute       | The number of requests processed by the model per minute.                                                                    | `num_completed_requests_per_min = num_completed_requests / (end_time - start_time) * 60`    | Requests      |
+| Requests Per Second       | The number of completed requests processed by the model per second.                                                          | `requests_per_second = num_completed_requests / run_duration`                               | Requests      |
 | Error Codes to Frequency  | A map that shows the returned error status code to its frequency.                                                            |                                                                                             |               |
 | Error Rate                | The rate of error requests over total requests.                                                                              | `error_rate = num_error_requests / num_requests`                                            |               |
 | Num of Error Requests     | The number of error requests in one load.                                                                                    | <pre><code>if requests.status_code != '200': <br/> num_error_requests += 1</code></pre>     |               |
 | Num of Completed Requests | The number of completed requests in one load.                                                                                | <pre><code>if requests.status_code == '200': <br/> num_completed_requests += 1</code></pre> |               |
 | Num of Requests           | The total number of requests processed for one load.                                                                         | `total_requests = num_completed_requests + num_error_requests`                              |               |
+
+**NOTE**:
+
+- `run_duration` is the wall-clock duration of the aggregated window, i.e.
+  `end_time - start_time`. When `--warmup-ratio` and/or `--cooldown-ratio` are
+  set, both the request statistics *and* `run_duration` are trimmed to the same
+  window, so the token sums in the numerators always cover the same portion of
+  the run as the denominators.
+- The `num_*_requests`, `error_codes_frequency` and `error_rate` counters are
+  also reported for the trimmed window only, not for the whole run.

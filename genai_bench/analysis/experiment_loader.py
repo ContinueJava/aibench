@@ -49,6 +49,14 @@ def load_multiple_experiments(
             metadata, run_data = load_one_experiment(subfolder_path, filter_criteria)
             if metadata and run_data:
                 run_data_list.append((metadata, run_data))
+            else:
+                # Skipping silently made a misconfigured filter look like an
+                # empty (but successful) plot run.
+                logger.warning(
+                    f"‼️ Skipping experiment folder {subfolder_path}: "
+                    f"no readable experiment_metadata.json or no matching run "
+                    f"result files."
+                )
 
     return run_data_list
 
@@ -89,13 +97,22 @@ def load_one_experiment(
     if not run_data:
         return experiment_metadata, run_data
 
-    for scenario in experiment_metadata.traffic_scenario:
-        if scenario not in run_data:
-            logger.warning(
-                f"‼️ Scenario {scenario} in metadata but metrics not found! "
-                f"Please re-run this scenario if necessary!"
-            )
-            experiment_metadata.traffic_scenario.remove(scenario)
+    # Build the list of scenarios to drop, then remove them in one pass. Mutating
+    # the list that is being iterated over makes the loop skip the element right
+    # after every removed one, so two adjacent missing scenarios left the second
+    # one in traffic_scenario and the reports then rendered a scenario with no
+    # data at all.
+    missing_scenarios = [
+        scenario
+        for scenario in experiment_metadata.traffic_scenario
+        if scenario not in run_data
+    ]
+    for scenario in missing_scenarios:
+        logger.warning(
+            f"‼️ Scenario {scenario} in metadata but metrics not found! "
+            f"Please re-run this scenario if necessary!"
+        )
+        experiment_metadata.traffic_scenario.remove(scenario)
 
     expected_concurrency = set(
         {
@@ -105,9 +122,10 @@ def load_one_experiment(
     )
 
     # Check if any scenarios are missing concurrency levels
+    levels_key = f"{experiment_metadata.iteration_type}_levels"
     for scenario_key, scenario_data in run_data.items():
         seen_concurrency: Set[int] = scenario_data.get(
-            f"{experiment_metadata.iteration_type}_levels", set()
+            levels_key, set()
         )  # type: ignore[call-overload]
         missing_concurrency: List[Any] = sorted(expected_concurrency - seen_concurrency)
         if missing_concurrency:
@@ -116,7 +134,10 @@ def load_one_experiment(
                 f"{experiment_metadata.iteration_type} levels: {missing_concurrency}. "
                 f"Please re-run this scenario if necessary!"
             )
-        del scenario_data[f"{experiment_metadata.iteration_type}_levels"]  # type: ignore[arg-type]
+        # Only drop the bookkeeping key when it is actually there: a run file
+        # recorded with a different iteration_type would otherwise raise
+        # KeyError here (the .get above tolerates it, the del did not).
+        scenario_data.pop(levels_key, None)  # type: ignore[arg-type]
 
     return experiment_metadata, run_data
 

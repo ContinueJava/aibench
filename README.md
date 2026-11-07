@@ -45,6 +45,21 @@ It provides detailed insights into model serving performance, offering both a us
 **Quick Start**: Install with `pip install genai-bench`.
 Alternatively, check [Installation Guide](https://docs.sglang.ai/genai-bench/getting-started/installation) for other options.
 
+### Optional extras
+
+The base install covers local / OpenAI-compatible servers (chat, embedding,
+rerank), the WebUI, and the post-run Excel/PNG report. The OCI SDK — by far the
+heaviest dependency — is opt-in, so a default install is ~560 MB of
+site-packages instead of ~940 MB:
+
+| Extra | Install | Needed for |
+| --- | --- | --- |
+| `oci` | `pip install "genai-bench[oci]"` | the four OCI backends (`--api-backend oci-openai / oci-cohere / oci-cohere-v2 / oci-genai`) and `--upload-results` to OCI Object Storage |
+
+Running an OCI backend without the extra fails fast with an install hint instead
+of a `ModuleNotFoundError` from inside locust.
+`pip install "genai-bench[multi-cloud]"` pulls every cloud SDK at once.
+
 ## How to use
 
 ### Quick Start
@@ -84,6 +99,38 @@ Alternatively, check [Installation Guide](https://docs.sglang.ai/genai-bench/get
    genai-bench plot --experiments-folder ./experiments \
      --group-key traffic_scenario --preset 2x4_default
    ```
+
+### Web UI (single-user console)
+
+One command, one port, one page — preflight → pick a task → stress-tier defaults
+(or a purpose-named preset) → strictly serial runs → live monitor → history →
+compare charts / ZIP export → reproduce:
+
+```bash
+genai-bench webui --host 0.0.0.0 --port 8000
+# open http://127.0.0.1:8000
+```
+
+Runs are executed by the normal CLI in a subprocess (results are the same files
+and metrics as a manual `genai-bench benchmark`), so engine results keep their
+original names. See [docs/webui-single-user.md](docs/webui-single-user.md) and
+the hands-on walkthrough [docs/webui-tutorial-zh.md](docs/webui-tutorial-zh.md).
+
+### Docker
+
+```bash
+docker build -t genai-bench:latest .
+docker run -d --name gb -p 8000:8000 -v "$PWD/experiments:/experiments" genai-bench:latest
+```
+
+The image is multi-stage: Node exists only in the frontend build stage, and the
+final image ships just the Python package (static assets included, no
+`frontend/` source). The default command is `genai-bench webui --host 0.0.0.0
+--port 8000`; override it to use the plain CLI, e.g.
+`docker run --rm genai-bench:latest benchmark --help`. Experiment state lives in
+the `/experiments` volume, so recreating the container keeps history.
+Note: from inside the container `localhost` is the container itself — point
+`api_base` at the host IP or at a service name on the same Docker network.
 
 ### Next Steps
 

@@ -156,7 +156,7 @@ class AggregatedMetrics(BaseModel):
     )
     mean_input_throughput_tokens_per_s: float = Field(
         0.0,
-        description="The mean of output tokens throughput across all requests "
+        description="The mean of input tokens throughput across all requests "
         "in tokens/s",
     )
     mean_total_tokens_throughput_tokens_per_s: float = Field(
@@ -183,12 +183,16 @@ class AggregatedMetrics(BaseModel):
     )
 
     def model_dump(self, *args, **kwargs) -> Dict:
-        data = super().model_dump()
+        # Forward the caller's arguments: dropping them silently ignored
+        # exclude_none=True / mode="json" and similar options.
+        data = super().model_dump(*args, **kwargs)
         data["stats"] = self.stats.to_dict()
         return data
 
     @classmethod
     def model_validate(cls, obj: Any, *args, **kwargs) -> "AggregatedMetrics":
-        if isinstance(obj.get("stats"), dict):
-            obj["stats"] = MetricStats.from_dict(obj["stats"])
+        # Only dicts need the stats conversion, and it must not mutate the
+        # caller's object, so work on a shallow copy.
+        if isinstance(obj, dict) and isinstance(obj.get("stats"), dict):
+            obj = {**obj, "stats": MetricStats.from_dict(obj["stats"])}
         return super().model_validate(obj)

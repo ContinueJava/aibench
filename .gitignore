@@ -29,10 +29,15 @@ __pycache__/
 ./.DS_Store
 /dist/
 
+# WebUI demo/runtime artifacts (must NEVER be committed)
+genai_bench_experiments/
+tools/local_models/
+tools/logs/
+docs/demo/
+results/
+
 # data
 *.jsonl
-
-# generated data
 genai_bench*.log
 # PyPI configuration file
 .pypirc

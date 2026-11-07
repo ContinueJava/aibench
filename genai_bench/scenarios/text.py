@@ -81,6 +81,21 @@ class UniformDistribution(Scenario):
         min_input_tokens: Optional[int] = None,
         min_output_tokens: Optional[int] = None,
     ):
+        # np.random.uniform does not complain about low > high, it just flips
+        # the interval silently, so U(500,100)/(200,300) would sample from
+        # [100, 500) without saying anything.
+        if min_input_tokens is not None and min_input_tokens > max_input_tokens:
+            raise ValueError(
+                f"Invalid uniform scenario U: min_input_tokens "
+                f"({min_input_tokens}) must be <= max_input_tokens "
+                f"({max_input_tokens})."
+            )
+        if min_output_tokens is not None and min_output_tokens > max_output_tokens:
+            raise ValueError(
+                f"Invalid uniform scenario U: min_output_tokens "
+                f"({min_output_tokens}) must be <= max_output_tokens "
+                f"({max_output_tokens})."
+            )
         self.min_input_tokens = min_input_tokens
         self.max_input_tokens = max_input_tokens
         self.min_output_tokens = min_output_tokens

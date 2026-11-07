@@ -4,6 +4,9 @@ import os
 from typing import Any, Dict, Optional
 
 from genai_bench.auth.storage_auth_provider import StorageAuthProvider
+from genai_bench.logging import init_logger
+
+logger = init_logger(__name__)
 
 
 class AzureBlobAuth(StorageAuthProvider):
@@ -59,6 +62,14 @@ class AzureBlobAuth(StorageAuthProvider):
 
             if self.account_key:
                 config["account_key"] = self.account_key
+                if self.sas_token:
+                    # Silently preferring the account key used to make a
+                    # supplied SAS token look applied while it was ignored.
+                    logger.warning(
+                        "Both an Azure account key and a SAS token are "
+                        "configured; the account key takes precedence and the "
+                        "SAS token is ignored."
+                    )
             elif self.sas_token:
                 config["sas_token"] = self.sas_token
             elif self.use_azure_ad:

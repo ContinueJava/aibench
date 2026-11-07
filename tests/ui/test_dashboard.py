@@ -93,6 +93,40 @@ def test_handle_single_request_with_error(mock_dashboard: create_dashboard):
     mock_dashboard.update_histogram_panel.assert_not_called()
 
 
+def test_progress_with_zero_max_requests_per_run(mock_dashboard):
+    """A zero limit must not divide by zero while rendering the dashboard."""
+    live_metrics = {
+        "ttft": [0.5],
+        "input_throughput": [100],
+        "output_throughput": [200],
+        "output_latency": [1.5],
+        "stats": {
+            "ttft": calculate_stats([0.5]),
+            "input_throughput": calculate_stats([100]),
+            "output_latency": calculate_stats([1.5]),
+            "output_throughput": calculate_stats([200]),
+        },
+    }
+    mock_dashboard.calculate_time_based_progress = MagicMock(return_value=50)
+    mock_dashboard.update_benchmark_progress_bars = MagicMock()
+    mock_dashboard.update_metrics_panels = MagicMock()
+    mock_dashboard.update_histogram_panel = MagicMock()
+    mock_dashboard.max_requests_per_run = 0
+
+    mock_dashboard.handle_single_request(
+        live_metrics, total_requests=10, error_code=None
+    )
+
+    progress = mock_dashboard.update_benchmark_progress_bars.call_args[0][0]
+    assert progress == 100.0
+
+
+def test_time_based_progress_with_zero_run_time(mock_dashboard):
+    """A zero run_time must not divide by zero while rendering the dashboard."""
+    mock_dashboard.run_time = 0
+    assert mock_dashboard.calculate_time_based_progress() == 100.0
+
+
 # Test for update_metrics_panels method when stats are provided
 def test_update_metrics_panels_with_stats(mock_dashboard: create_dashboard):
     live_metrics = {

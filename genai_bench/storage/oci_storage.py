@@ -81,11 +81,16 @@ class OCIObjectStorage(BaseStorage):
                 f"Local folder not found or not a directory: {local_folder}"
             )
 
+        uploaded = 0
+
         # Upload all files in the folder
         for file_path in local_folder.rglob("*"):
             if file_path.is_file():
-                # Calculate relative path
-                relative_path = file_path.relative_to(local_folder)
+                # Calculate relative path. Object keys always use "/" so that
+                # the layout produced on Windows matches the one produced on
+                # Linux, and so that prefix filtering (which splits on "/")
+                # finds the objects again.
+                relative_path = file_path.relative_to(local_folder).as_posix()
 
                 # Construct remote path with prefix
                 if prefix:
@@ -95,6 +100,13 @@ class OCIObjectStorage(BaseStorage):
 
                 # Upload file
                 self.upload_file(file_path, remote_path, bucket, **kwargs)
+                uploaded += 1
+
+        if uploaded == 0:
+            logger.warning(
+                f"No files were found to upload in {local_folder}. "
+                f"Nothing was written to bucket {bucket}."
+            )
 
     def download_file(
         self, remote_path: str, local_path: Union[str, Path], bucket: str, **kwargs

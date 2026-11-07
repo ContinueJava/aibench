@@ -39,7 +39,12 @@ class OCIOBOTokenAuth(AuthProvider):
             Exception: If token is invalid
         """
         if self._signer is None:
-            self._signer = oci.auth.signers.SecurityTokenSigner(
-                self.token, region=self.region
+            # OBO ("on behalf of") delegation is signed by an instance
+            # principal signer that adds the opc-obo-token header. The previous
+            # implementation built a SecurityTokenSigner with a `region` kwarg,
+            # which both takes no such argument and is the wrong signer for
+            # this flow, so every OBO run failed at signer construction.
+            self._signer = oci.auth.signers.InstancePrincipalsDelegationTokenSigner(
+                delegation_token=self.token
             )
         return self._signer

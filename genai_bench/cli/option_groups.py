@@ -1,5 +1,6 @@
+import os
+
 import click
-import oci
 
 from genai_bench.cli.validation import (
     DEFAULT_BATCH_SIZES,
@@ -15,6 +16,7 @@ from genai_bench.cli.validation import (
     validate_task,
     validate_traffic_scenario_callback,
     validate_warmup_cooldown_ratio_options,
+    validate_warmup_ratio_options,
 )
 
 
@@ -264,14 +266,14 @@ def oci_auth_options(func):
     func = click.option(
         "--config-file",
         type=str,
-        default=oci.config.DEFAULT_LOCATION,
+        default=os.path.expanduser("~/.oci/config"),
         help="Path to OCI config file for user_principal authentication",
     )(func)
 
     func = click.option(
         "--profile",
         type=str,
-        default=oci.config.DEFAULT_PROFILE,
+        default="DEFAULT",
         help="OCI config profile name for user_principal authentication",
     )(func)
 
@@ -368,22 +370,20 @@ def server_options(func):
     )(func)
     func = click.option(
         "--server-gpu-type",
-        type=click.Choice(
-            [
-                "H100",
-                "A100-80G",
-                "A100-40G",
-                "MI300",
-                "A10",
-                "H200",
-                "B200",
-                "RTX-PRO-6000",
-            ],
-            case_sensitive=True,
-        ),
+        type=str,
         required=False,
         default=None,
-        help="The type of the GPU node serving the backend model server.",
+        help=(
+            "The type of the GPU node serving the backend model server. Free text: "
+            "it is recorded as metadata only and never affects sampling or metrics. "
+            "Suggested values: H100, H200, B200, A100-80G, A100-40G, A10, "
+            "RTX-PRO-6000 (NVIDIA), MI300 (AMD), Ascend-310P, Ascend-910B, "
+            "Ascend-910B3, Ascend-910B4, Ascend-910C, Ascend-950PR, Ascend-950DT, "
+            "Atlas-300I-Duo, Atlas-800T-A2 (Huawei Ascend), Zhenwu-810E, "
+            "Zhenwu-M890, Zhenwu-V900, Hanguang-800 (Alibaba), Hygon-DCU (Hygon), "
+            "MLU-590 (Cambricon), Kunlunxin-P800 (Baidu), or anything else your "
+            "node reports."
+        ),
     )(func)
     func = click.option(
         "--server-version",
@@ -436,7 +436,7 @@ def experiment_options(func):
     )(func)
     func = click.option(
         "--max-requests-per-run",
-        type=int,
+        type=click.IntRange(min=1),
         required=True,
         prompt=True,
         help="The maximum number of requests per experiment run. "
@@ -445,7 +445,7 @@ def experiment_options(func):
     )(func)
     func = click.option(
         "--max-time-per-run",
-        type=int,
+        type=click.IntRange(min=1),
         required=True,
         prompt=True,
         help="The max duration per experiment run. Unit: minute. "
@@ -456,6 +456,7 @@ def experiment_options(func):
         "--warmup-ratio",
         type=click.FloatRange(0.0, 1.0, min_open=False, max_open=True),
         default=None,
+        callback=validate_warmup_ratio_options,
         help=(
             "The ratio of the benchmark to run as a warmup "
             "and not include in the final results."

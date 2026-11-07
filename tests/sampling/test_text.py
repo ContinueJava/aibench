@@ -467,3 +467,65 @@ class TestTextSampler(unittest.TestCase):
                 num_chars,
                 f"Expected {num_chars} chars, got {len(result)}",
             )
+
+    def test_generate_text_from_dataset_raises_on_empty_dataset(self):
+        """An empty dataset must fail loudly instead of looping forever."""
+        sampler = TextSampler(
+            tokenizer=self.tokenizer,
+            model=self.model,
+            output_modality="text",
+            data=[],
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            sampler._generate_text_from_dataset(num_tokens=10)
+        self.assertIn("dataset is empty", str(ctx.exception))
+
+    def test_generate_text_by_chars_raises_on_empty_dataset(self):
+        """An empty dataset must fail loudly in the char-based path too."""
+        sampler = TextSampler(
+            tokenizer=self.tokenizer,
+            model=self.model,
+            output_modality="speech",
+            data=[],
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            sampler._generate_text_by_chars(num_chars=10)
+        self.assertIn("dataset is empty", str(ctx.exception))
+
+    def test_generate_text_by_chars_raises_on_blank_lines(self):
+        """A dataset of only blank lines has no usable prompt text."""
+        sampler = TextSampler(
+            tokenizer=self.tokenizer,
+            model=self.model,
+            output_modality="speech",
+            data=["", "   ", "\n"],
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            sampler._generate_text_by_chars(num_chars=10)
+        self.assertIn("dataset is empty", str(ctx.exception))
+
+    def test_sample_text_zero_tokens_returns_empty_string(self):
+        """0 tokens means "empty prompt", not "pick a random line"."""
+        self.assertEqual(self.sampler._sample_text(0), "")
+        self.assertIn(self.sampler._sample_text(None), self.test_data)
+
+    def test_generate_text_from_dataset_inserts_separator(self):
+        """Concatenated lines must not be glued together."""
+        tokenizer = MagicMock()
+        # A MagicMock's __len__ is 0, so the line-token count must be real or
+        # the sampling loop never terminates.
+        tokenizer.encode = lambda line, add_special_tokens=False: line.split()
+        tokenizer.decode = lambda tokens, skip_special_tokens=True: " ".join(tokens)
+        sampler = TextSampler(
+            tokenizer=tokenizer,
+            model=self.model,
+            output_modality="text",
+            data=["thee", "Shall I compare"],
+        )
+
+        text = sampler._generate_text_from_dataset(num_tokens=2)
+        self.assertIn(" ", text)
+        self.assertNotIn("theeShall", text)

@@ -429,9 +429,28 @@ class OpenAIUser(BaseUser):
             # differently. Some might return 200 first and generate error response
             # later in the chunk
             if data.get("error") is not None:
+                error_obj = data["error"] or {}
+                error_code = error_obj.get("code")
+                if error_code is None:
+                    # OpenAI-compatible servers send {"error": {"message": ...}}
+                    # without a "code". Reporting None made the metrics
+                    # collector treat the record as a *successful* request
+                    # (error_code is the success/failure discriminator), so the
+                    # failure was silently dropped from error_rate. The HTTP
+                    # status is usually 200 here (the error arrives mid-stream),
+                    # which is why it cannot be reused as-is.
+                    error_code = (
+                        response.status_code
+                        if response.status_code and response.status_code != 200
+                        else 500
+                    )
+                    logger.warning(
+                        f"Streaming error chunk has no error code, recording "
+                        f"{error_code} instead: {error_obj.get('message', '')}"
+                    )
                 return UserResponse(
-                    status_code=data["error"].get("code", -1),
-                    error_message=data["error"].get(
+                    status_code=error_code,
+                    error_message=error_obj.get(
                         "message", "Unknown error, please check server logs"
                     ),
                 )

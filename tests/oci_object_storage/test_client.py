@@ -410,13 +410,15 @@ def test_upload_large_file_error(
         test_store.upload(str(source), uri)
     assert str(exc.value) == "Multipart upload failed: Upload failed"
 
-    # Verify UploadManager setup
-    mock_upload_manager_class.assert_called_once_with(
+    # Verify UploadManager setup. upload() honours its "retries" argument
+    # (default 3), so the manager is built and the same call attempted three
+    # times before the error is finally propagated.
+    mock_upload_manager_class.assert_called_with(
         test_store.client, allow_multipart_uploads=True
     )
-
-    # Verify upload_file call
-    mock_upload_manager.upload_file.assert_called_once_with(
+    assert mock_upload_manager_class.call_count == 3
+    assert mock_upload_manager.upload_file.call_count == 3
+    mock_upload_manager.upload_file.assert_called_with(
         namespace_name="test",
         bucket_name="bucket",
         object_name="test.txt",

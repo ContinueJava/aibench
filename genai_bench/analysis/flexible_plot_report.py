@@ -11,6 +11,7 @@ from matplotlib.figure import Figure
 from genai_bench.analysis.experiment_loader import ExperimentMetrics, MetricsData
 from genai_bench.analysis.plot_config import PlotConfig, PlotConfigManager, PlotSpec
 from genai_bench.analysis.plot_report import (
+    copy_plot_artists,
     get_scenario_data,
     plot_error_rates,
     plot_graph,
@@ -29,6 +30,10 @@ class FlexiblePlotGenerator:
     def __init__(self, config: PlotConfig):
         """Initialize with plot configuration and time unit."""
         self.config = config
+        # Set when multi-line plots were downgraded to single-line because the
+        # figure holds several groups. The downgraded lines still need a
+        # legend, but the "multi-line" branch below skips the global one.
+        self._used_single_line_fallback = False
 
     def generate_plots(
         self,
@@ -249,41 +254,46 @@ class FlexiblePlotGenerator:
             "Converting multi-line plots to single-line plots for better "
             "visualization with multiple groups"
         )
+        self._used_single_line_fallback = True
 
         for i, concurrency_data in enumerate(concurrency_data_list):
             concurrency_levels = label_to_concurrency_map[labels[i]]
 
             for plot_spec in self.config.plots:
                 if plot_spec.is_multi_line():
-                    # For multi-line plots, just use the first Y-field
-                    y_field_specs = plot_spec.get_y_field_specs()
-                    first_field = y_field_specs[0]
-
-                    # Create a temporary single-line plot spec
+                    # Every Y-field has to be drawn, not just the first one:
+                    # taking y_field_specs[0] silently threw away the other
+                    # metrics the user asked for in the plot config.
                     from genai_bench.analysis.plot_config import PlotSpec
 
-                    single_line_spec = PlotSpec(
-                        title=f"{plot_spec.title} "
-                        f"({first_field.label or self._generate_label(first_field.field, metrics_time_unit)})",  # noqa: E501
-                        x_field=plot_spec.x_field,
-                        y_field=first_field.field,
-                        x_label=plot_spec.x_label,
-                        y_fields=None,
-                        position=plot_spec.position,
-                        y_scale=plot_spec.y_scale,
-                        y_label=plot_spec.y_label,
-                        plot_type=plot_spec.plot_type,
-                    )
+                    for field_spec in plot_spec.get_y_field_specs():
+                        field_label = field_spec.label or self._generate_label(
+                            field_spec.field, metrics_time_unit
+                        )
+                        single_line_spec = PlotSpec(
+                            title=f"{plot_spec.title} ({field_label})",
+                            x_field=plot_spec.x_field,
+                            y_field=field_spec.field,
+                            x_label=plot_spec.x_label,
+                            y_fields=None,
+                            position=plot_spec.position,
+                            y_scale=plot_spec.y_scale,
+                            y_label=plot_spec.y_label,
+                            plot_type=plot_spec.plot_type,
+                        )
 
-                    self._plot_single_line_metric(
-                        plot_spec=single_line_spec,
-                        ax=axs[plot_spec.position[0], plot_spec.position[1]],
-                        concurrency_data=concurrency_data,
-                        concurrency_levels=concurrency_levels,
-                        label=labels[i],
-                        metrics_time_unit=metrics_time_unit,
-                        source_time_unit=source_time_unit,
-                    )
+                        self._plot_single_line_metric(
+                            plot_spec=single_line_spec,
+                            ax=axs[plot_spec.position[0], plot_spec.position[1]],
+                            concurrency_data=concurrency_data,
+                            concurrency_levels=concurrency_levels,
+                            # Include the metric name so the legend still
+                            # tells the lines apart once several fields from
+                            # several groups share one subplot.
+                            label=f"{labels[i]} - {field_label}",
+                            metrics_time_unit=metrics_time_unit,
+                            source_time_unit=source_time_unit,
+                        )
                 else:
                     # Regular single-line plot
                     self._plot_single_metric(
@@ -421,6 +431,12 @@ class FlexiblePlotGenerator:
                 plot_type=plot_spec.plot_type,
                 metrics_time_unit=metrics_time_unit,
             )
+
+            # The multi-line path already honours y_scale; the single-line path
+            # used to ignore it, so a config requesting a log axis silently
+            # produced a linear chart.
+            if plot_spec.y_scale == "log":
+                ax.set_yscale("log", base=10)
 
     def _add_plot_annotations(
         self,
@@ -656,18 +672,9 @@ class FlexiblePlotGenerator:
 
             fig_temp, ax_temp = plt.subplots(figsize=(10, 6))
 
-            # Copy all line plots with proper styling
-            for line in ax.get_lines():
-                ax_temp.plot(
-                    line.get_xdata(),
-                    line.get_ydata(),
-                    label=line.get_label(),
-                    marker=line.get_marker(),
-                    linestyle=line.get_linestyle(),
-                    color=line.get_color(),
-                    markersize=line.get_markersize(),
-                    alpha=line.get_alpha() or 1.0,
-                )
+            # Copy every artist, not just lines: bar and scatter subplots
+            # came out blank in the individual PNG otherwise.
+            copy_plot_artists(ax, ax_temp)
 
             # Copy annotations - handle both multi-line and single-line plots
             # For all plots (multi-line and single-line), copy existing annotations
@@ -814,7 +821,10 @@ class FlexiblePlotGenerator:
         # Only add global legend for single-line plots
         has_multi_line = any(plot.is_multi_line() for plot in self.config.plots)
 
-        if not has_multi_line:
+        if not has_multi_line or self._used_single_line_fallback:
+            # A downgraded multi-line figure has plain single-line axes with
+            # no legend of their own; without this the combined PNG lost every
+            # legend entry.
             fig.legend(labels=labels, loc="lower center", ncol=3, fancybox=True)
             plt.tight_layout()
             plt.subplots_adjust(bottom=0.1)

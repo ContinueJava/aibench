@@ -153,11 +153,15 @@ class AzureBlobStorage(BaseStorage):
                 f"Local folder not found or not a directory: {local_folder}"
             )
 
+        uploaded = 0
+
         # Upload all files in the folder
         for file_path in local_folder.rglob("*"):
             if file_path.is_file():
-                # Calculate relative path
-                relative_path = file_path.relative_to(local_folder)
+                # Calculate relative path. Blob names always use "/" so that a
+                # folder uploaded from Windows produces the same layout as one
+                # uploaded from Linux.
+                relative_path = file_path.relative_to(local_folder).as_posix()
 
                 # Construct blob name with prefix
                 if prefix:
@@ -167,6 +171,13 @@ class AzureBlobStorage(BaseStorage):
 
                 # Upload file
                 self.upload_file(file_path, blob_name, bucket, **kwargs)
+                uploaded += 1
+
+        if uploaded == 0:
+            logger.warning(
+                f"No files were found to upload in {local_folder}. "
+                f"Nothing was written to container {bucket}."
+            )
 
     def download_file(
         self, remote_path: str, local_path: Union[str, Path], bucket: str, **kwargs

@@ -42,8 +42,20 @@ def _group_empty_columns(wb: Workbook) -> None:
                 if value is None or value == 0 or value == 0.0:
                     continue
                 if isinstance(value, str) and value.startswith("{"):
-                    parsed = json.loads(value)
-                    if parsed and all(v is None or v == 0 for v in parsed.values()):
+                    # error_message holds the raw response body, which is not
+                    # necessarily valid JSON even when it starts with "{"
+                    # (truncated body, proxy error, trailing garbage). A parse
+                    # failure here used to abort the whole export after every
+                    # sheet had been built, losing the file entirely.
+                    try:
+                        parsed = json.loads(value)
+                    except (json.JSONDecodeError, TypeError):
+                        parsed = None
+                    if (
+                        isinstance(parsed, dict)
+                        and parsed
+                        and all(v is None or v == 0 for v in parsed.values())
+                    ):
                         continue
                 all_empty = False
                 break
@@ -90,6 +102,20 @@ def create_workbook(
     metrics_time_unit: str = "s",
     task: str = "",
 ):
+    # Callers get an Optional metadata from load_one_experiment, which returns
+    # None when the folder has no experiment_metadata.json. Fail with a message
+    # that names the problem instead of an AttributeError on the next line.
+    if experiment_metadata is None:
+        raise ValueError(
+            "experiment_metadata is None: the experiment folder does not contain "
+            "a readable experiment_metadata.json."
+        )
+    if not run_data:
+        raise ValueError(
+            "run_data is empty: the experiment folder does not contain any run "
+            "result files (*_concurrency_<n>_time_<n>s.json)."
+        )
+
     # Extract time unit from experiment metadata
     source_time_unit = experiment_metadata.metrics_time_unit
 
@@ -147,7 +173,12 @@ def create_workbook(
         wb, run_data, experiment_metadata, metrics_time_unit=metrics_time_unit
     )
 
-    if task == "text-to-speech":
+    # `genai-bench excel` does not pass task at all, so fall back to the task
+    # recorded in the metadata. Without this the TTS header rename below never
+    # ran for that entry point, even though the same folder exported through
+    # `genai-bench benchmark` got the renamed headers.
+    effective_task = task or experiment_metadata.task
+    if effective_task == "text-to-speech":
         _rename_headers(wb, {"TTFT": "TTFB", "ttft": "ttfb"})
 
     _group_empty_columns(wb)
@@ -178,14 +209,27 @@ def _create_sheet_with_common_layout(
         sheet.append(row)
         num_rows += 1
 
-    # Merge GPU Type column cells
-    merge_cells(sheet, 2, num_rows, 1)
+    # Merge GPU Type column cells. Needs at least two data rows: merging from
+    # row 2 to row 1 (an empty table) makes openpyxl raise
+    # "ValueError: 1 must be greater than 2".
+    if num_rows > 1:
+        merge_cells(sheet, 2, num_rows, 1)
 
     apply_number_format(sheet, exclude_columns=["A", "B", "C"])
     column_width_autofit(sheet)
     make_header_bold(sheet)
 
     return sheet
+
+
+def _task_uses_throughput_metric(task: str) -> bool:
+    """Return True for tasks whose output is not a token stream.
+
+    rerank and image generation reset the output-token metrics to 0, so the
+    Summary sheet has to select the target iteration by throughput instead of
+    by output inference speed.
+    """
+    return task in {"text-to-rerank", "text-to-image"}
 
 
 def _create_summary_sheet_common(
@@ -229,6 +273,16 @@ def _create_summary_sheet_common(
     # Then scenarios outside the normal cases
     merged_scenarios = reorder_scenarios(SCENARIO_MAP, experiment_metadata)
 
+    # rerank and image generation do not produce streaming output, so
+    # output_inference_speed is reset to 0 for them (see
+    # RequestMetricsCollector._reset_output_metrics). Selecting the target
+    # iteration by that metric therefore never passed the threshold, and the
+    # whole Summary table came out as "N/A". Use throughput instead, the same
+    # way embeddings already do.
+    uses_throughput = is_embedding or _task_uses_throughput_metric(
+        experiment_metadata.task
+    )
+
     rows = []
 
     for scenario in merged_scenarios:
@@ -265,7 +319,7 @@ def _create_summary_sheet_common(
                 metrics = run_data[scenario][iteration]["aggregated_metrics"]
                 metric_value = (
                     metrics.mean_total_tokens_throughput_tokens_per_s
-                    if is_embedding
+                    if uses_throughput
                     else metrics.stats.output_inference_speed[percentile]
                 )
                 if metric_value is not None and metric_value > threshold:
@@ -285,12 +339,19 @@ def _create_summary_sheet_common(
                     )
 
             if summary_value == -1:
-                logger.warning(
-                    f"For scenario '{scenario}', couldn't find a concurrency "
-                    f"that meets the minimum output inference speed requirement:"
-                    f" {threshold} tokens/s."
-                    f" Please add lower concurrency test cases."
-                )
+                if uses_throughput:
+                    logger.warning(
+                        f"For scenario '{scenario}', couldn't find an "
+                        f"iteration that meets the minimum total throughput "
+                        f"requirement. Please add lower load test cases."
+                    )
+                else:
+                    logger.warning(
+                        f"For scenario '{scenario}', couldn't find a concurrency "
+                        f"that meets the minimum output inference speed requirement:"
+                        f" {threshold} tokens/s."
+                        f" Please add lower concurrency test cases."
+                    )
                 display_summary_value = "N/A"
                 display_total_tokens_per_minute = "N/A"
             else:
@@ -609,9 +670,9 @@ def create_single_request_metrics_sheet(
         start_row_iteration = start_row
         for iteration in sorted(run_data.get(scenario, [])):
             row_for_iteration = 0
-            metrics: List[RequestLevelMetrics] = run_data[scenario][iteration][  # type: ignore[call-overload, assignment]
-                "individual_request_metrics"
-            ]
+            metrics: List[RequestLevelMetrics] = run_data[scenario][iteration].get(  # type: ignore[call-overload, assignment]
+                "individual_request_metrics", []
+            )
             for single_request_metrics in metrics:
                 row = [scenario, iteration]
                 for header in headers[2:]:  # Skip scenario and iteration_type
@@ -622,18 +683,22 @@ def create_single_request_metrics_sheet(
                 sheet.append(row)
                 rows_for_scenario += 1
                 row_for_iteration += 1
-            merge_cells(
-                sheet,
-                start_row_iteration,
-                row_for_iteration + start_row_iteration - 1,
-                1,
-            )
-            merge_cells(
-                sheet,
-                start_row_iteration,
-                row_for_iteration + start_row_iteration - 1,
-                2,
-            )
+            # Nothing to merge when the run file has no per-request metrics.
+            # Merging a single-row (or empty) range makes openpyxl raise
+            # "ValueError: 1 must be greater than 2".
+            if row_for_iteration:
+                merge_cells(
+                    sheet,
+                    start_row_iteration,
+                    row_for_iteration + start_row_iteration - 1,
+                    1,
+                )
+                merge_cells(
+                    sheet,
+                    start_row_iteration,
+                    row_for_iteration + start_row_iteration - 1,
+                    2,
+                )
             start_row_iteration += row_for_iteration
 
         start_row += rows_for_scenario
@@ -726,24 +791,30 @@ def is_within_relative_difference(
         throughput_threshold: Maximum acceptable relative difference for
             throughput. Defaults to 0.05 (5%).
         requests_threshold: Maximum acceptable relative difference for requests
-            per minute. Defaults to 0.05 (5%).
+            per second. Defaults to 0.05 (5%).
 
     Returns:
-        bool: True if both throughput and requests per minute are within the
+        bool: True if both throughput and requests per second are within the
             defined threshold, False otherwise.
     """
     prev_throughput = previous_metrics.mean_total_tokens_throughput_tokens_per_s
-    prev_requests_per_minute = previous_metrics.requests_per_second
+    prev_requests_per_second = previous_metrics.requests_per_second
+
+    # A previous level with zero throughput or zero RPS (every request failed,
+    # or the aggregation window only contained failures) has no meaningful
+    # baseline to compare against, and dividing by it raises ZeroDivisionError.
+    if not prev_throughput or not prev_requests_per_second:
+        return False
 
     throughput_diff = (
         abs(current_metrics.mean_total_tokens_throughput_tokens_per_s - prev_throughput)
         / prev_throughput
     )
     requests_diff = (
-        abs(current_metrics.requests_per_second - prev_requests_per_minute)
-        / prev_requests_per_minute
+        abs(current_metrics.requests_per_second - prev_requests_per_second)
+        / prev_requests_per_second
     )
 
-    # Check if both throughput and requests per minute are within the defined
+    # Check if both throughput and requests per second are within the defined
     # thresholds
     return throughput_diff < throughput_threshold and requests_diff < requests_threshold

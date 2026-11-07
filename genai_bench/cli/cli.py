@@ -1,6 +1,7 @@
 from locust.env import Environment
 from locust.runners import WorkerRunner
 
+import importlib.util
 import os
 import sys
 import time
@@ -9,13 +10,8 @@ from pathlib import Path
 import click
 import gevent
 
-from genai_bench.analysis.excel_report import create_workbook
 from genai_bench.analysis.experiment_loader import load_one_experiment
-from genai_bench.analysis.flexible_plot_report import plot_experiment_data_flexible
 from genai_bench.analysis.plot_config import PlotConfigManager
-from genai_bench.analysis.plot_report import (
-    plot_single_scenario_inference_speed_vs_throughput,
-)
 from genai_bench.auth.unified_factory import UnifiedAuthFactory
 from genai_bench.cli.option_groups import (
     api_options,
@@ -40,8 +36,58 @@ from genai_bench.protocol import ExperimentMetadata
 from genai_bench.sampling.base import Sampler
 from genai_bench.storage.factory import StorageFactory
 from genai_bench.ui.dashboard import create_dashboard
-from genai_bench.utils import sanitize_string
+from genai_bench.utils import SENSITIVE_PARAMS, sanitize_string
 from genai_bench.version import __version__ as GENAI_BENCH_VERSION
+
+# Backends that need an optional install extra.  `pip install genai-bench`
+# (and the slim Docker image) deliberately leaves these out so the base install
+# stays small; the warning below only fires when such a backend is actually
+# exercised, so nothing fails silently.
+"""Map an `--api-backend` to the optional module it needs at runtime.
+
+Only the OCI backends need a package outside the standard set: `cohere` talks
+plain HTTP (see `genai_bench/user/cohere_user.py`), so it is NOT listed here.
+"""
+_OPTIONAL_EXTRAS = {
+    "oci-cohere": "oci",
+    "oci-cohere-v2": "oci",
+    "oci-genai": "oci",
+    "oci-openai": "oci-openai",
+}
+
+
+def _advise_optional_extras(api_backend: str, logger) -> None:
+    """Warn early when the chosen backend needs a module that is not installed.
+
+    The OCI SDK is a 400+ MB dependency that only four backends use, so it is
+    packaged as the optional `oci` extra; the base install still has to give a
+    clear message instead of a bare ModuleNotFoundError deep inside locust.
+    """
+    module = _OPTIONAL_EXTRAS.get(str(api_backend or ""))
+    if not module:
+        return
+    if importlib.util.find_spec(module) is not None:
+        return
+    logger.warning(
+        "Backend '%s' needs the optional dependency '%s', which is not "
+        "installed in this environment. Install it with:\n"
+        "    pip install 'genai-bench[oci]'",
+        api_backend,
+        module,
+    )
+
+
+def _require_backend_dependency(api_backend: str, user_class) -> None:
+    """Abort with an actionable error when the backend's SDK is missing."""
+    module = _OPTIONAL_EXTRAS.get(str(api_backend or ""))
+    if not module or importlib.util.find_spec(module) is not None:
+        return
+    raise click.ClickException(
+        f"Backend '{api_backend}' requires the optional dependency '{module}', "
+        f"which is not installed.\n"
+        f"Install it with:  pip install 'genai-bench[oci]'\n"
+        f"(or use --api-backend openai|vllm|sglang for OpenAI-compatible servers)"
+    )
 
 
 @click.group()
@@ -166,15 +212,19 @@ def benchmark(
     delayed_log_handler = logging_manager.delayed_handler
     logger = init_logger("genai_bench.benchmark")
 
+    _advise_optional_extras(api_backend, logger)
+
     logger.info(
         f"👋 Welcome to genai-bench {GENAI_BENCH_VERSION}! I am an intelligent "
         "benchmark tool for Large Language Model."
     )
 
-    # Log all parameters
+    # Log all parameters. Credential values are replaced by a placeholder:
+    # the reconstructed command line and experiment_metadata.json are persisted
+    # on disk (and the console log too), so plain keys would leak.
     logger.info("Options you provided:")
     for key, value in ctx.params.items():
-        logger.info(f"{key}: {value}")
+        logger.info(f"{key}: {'***' if key in SENSITIVE_PARAMS and value else value}")
 
     # -------------------------------------
     # Authentication Section
@@ -218,6 +268,15 @@ def benchmark(
         )
 
     elif api_backend == "azure-openai":
+        # Azure accepts either an API key or an Azure AD token, but one of them
+        # is mandatory. validate_api_key cannot check this: its callback may run
+        # before --azure-ad-token is parsed, so the pair is checked here once
+        # every option is available.
+        if not model_api_key and not azure_ad_token:
+            raise click.UsageError(
+                "Azure OpenAI requires either --api-key (or AZURE_OPENAI_API_KEY) "
+                "or --azure-ad-token (or AZURE_AD_TOKEN)."
+            )
         auth_kwargs.update(
             {
                 "api_key": model_api_key,
@@ -263,10 +322,16 @@ def benchmark(
     auth_provider = UnifiedAuthFactory.create_model_auth(auth_backend, **auth_kwargs)
     logger.info(f"Using {api_backend} authentication")
 
-    # Rebuild the cmd_line from ctx.params
+    # Rebuild the cmd_line from ctx.params. Credential parameters are emitted
+    # as a placeholder flag value so the persisted command is reproducible
+    # without exposing secrets; use the corresponding env var to supply the
+    # real value.
     cmd_line_parts = [sys.argv[0]]
     for key, value in ctx.params.items():
-        if isinstance(value, (list, tuple)):
+        if key in SENSITIVE_PARAMS and value:
+            cmd_line_parts.append(f"--{key}".replace("_", "-"))
+            cmd_line_parts.append("***")
+        elif isinstance(value, (list, tuple)):
             for item in value:
                 cmd_line_parts.append(f"--{key}".replace("_", "-"))
                 cmd_line_parts.append(str(item))
@@ -278,9 +343,17 @@ def benchmark(
     user_class = ctx.obj.get("user_class")
     user_task = ctx.obj.get("user_task")
 
+    # Fail here (with an install hint) rather than deep inside locust when the
+    # selected backend needs an optional dependency that is not installed.
+    _require_backend_dependency(api_backend, user_class)
+
     # Set authentication and API configuration for the user class
     user_class.auth_provider = auth_provider
-    user_class.host = api_base
+    # Endpoints are appended as "/v1/..." by the user classes, so a trailing
+    # slash in --api-base produces a double slash ("http://host//v1/chat/...").
+    # Only a couple of backends normalised this themselves; do it once here so
+    # every backend gets the same host.
+    user_class.host = api_base.rstrip("/") if api_base else api_base
     user_class.api_backend = api_backend
     # Load the tokenizer
     tokenizer = validate_tokenizer(model_tokenizer)
@@ -409,6 +482,9 @@ def benchmark(
     # and run the experiment
     iteration_values = batch_size if iteration_type == "batch_size" else num_concurrency
     total_runs = len(traffic_scenario) * len(iteration_values)
+    # For batch_size iteration the concurrency is the fixed dimension: it stays
+    # constant across the whole series (1 unless the caller asked for more).
+    fixed_concurrency = int(num_concurrency[0]) if num_concurrency else 1
     with dashboard.live:
         for scenario_str in traffic_scenario:
             dashboard.reset_plot_metrics()
@@ -425,7 +501,7 @@ def benchmark(
                 dashboard.reset_panels()
                 # Create a new progress bar on dashboard
                 iteration_header, batch_size, concurrency = get_run_params(
-                    iteration_type, iteration
+                    iteration_type, iteration, fixed_concurrency
                 )
                 dashboard.create_benchmark_progress_task(
                     f"Scenario: {scenario_str}, {iteration_header}: {iteration}"
@@ -439,6 +515,7 @@ def benchmark(
                     scenario_str,
                     metrics_refresh_interval,
                     iteration_type,
+                    concurrency,
                 )
 
                 # Start the run
@@ -521,14 +598,27 @@ def benchmark(
                 # Sleep for 1 sec for server to clear aborted requests
                 gevent.sleep(1)
 
-            # Plot using in-memory data after all concurrency levels are done
-            plot_single_scenario_inference_speed_vs_throughput(
-                scenario_str,
-                experiment_folder_abs_path,
-                task,
-                scenario_metrics,
-                iteration_type,
-            )
+            # Plot using in-memory data after all concurrency levels are done.
+            # Pass the requested unit so the interim figure matches the final
+            # report instead of always rendering in seconds.
+            try:
+                from genai_bench.analysis.plot_report import (
+                    plot_single_scenario_inference_speed_vs_throughput,
+                )
+
+                plot_single_scenario_inference_speed_vs_throughput(
+                    scenario_str,
+                    experiment_folder_abs_path,
+                    task,
+                    scenario_metrics,
+                    iteration_type,
+                    metrics_time_unit=metrics_time_unit,
+                )
+            except ImportError as exc:
+                logger.warning(
+                    f"‼️ Skipping the interim plot ({exc.name} is not installed; "
+                    f"`pip install 'genai-bench[report]'` enables plots)."
+                )
 
         # Sleep for 2 secs before the UI disappears
         gevent.sleep(2)
@@ -543,35 +633,63 @@ def benchmark(
 
     # Generate excel and plots for report
     experiment_metadata, run_data = load_one_experiment(experiment_folder_abs_path)
-    create_workbook(
-        experiment_metadata,
-        run_data,
-        os.path.join(
-            experiment_folder_abs_path,
-            f"{Path(experiment_folder_abs_path).name}_summary.xlsx",
-        ),
-        percentile="mean",
-        metrics_time_unit=metrics_time_unit,
-        task=task,
-    )
-    tts_config = (
-        PlotConfigManager.load_preset("2x4_tts", metrics_time_unit)
-        if task == "text-to-speech"
-        else None
-    )
-    plot_experiment_data_flexible(
-        [
-            (experiment_metadata, run_data),
-        ],
-        group_key="traffic_scenario",
-        experiment_folder=experiment_folder_abs_path,
-        plot_config=tts_config,
-        metrics_time_unit=metrics_time_unit,
-    )
-    logger.info(
-        f"📁 Please check {experiment_folder_abs_path} "
-        f"for the detailed results, sheets, and plots."
-    )
+    if not experiment_metadata or not run_data:
+        # No run file was written (e.g. every run window was filtered out by
+        # --warmup-ratio/--cooldown-ratio). Report it and stop here instead of
+        # failing the whole run at the reporting step.
+        logger.warning(
+            f"‼️ No run data was produced in {experiment_folder_abs_path}, so no "
+            f"Excel report or plots can be generated. This usually means the run "
+            f"was too short for a request to complete or that "
+            f"--warmup-ratio/--cooldown-ratio filtered out every request."
+        )
+    else:
+        # Excel/plots need the optional `report` extra; a slim install still
+        # produces all raw results, it just cannot render the summary files.
+        try:
+            import matplotlib  # noqa: F401
+            import openpyxl  # noqa: F401
+
+            from genai_bench.analysis.excel_report import create_workbook
+            from genai_bench.analysis.flexible_plot_report import (
+                plot_experiment_data_flexible,
+            )
+
+            create_workbook(
+                experiment_metadata,
+                run_data,
+                os.path.join(
+                    experiment_folder_abs_path,
+                    f"{Path(experiment_folder_abs_path).name}_summary.xlsx",
+                ),
+                percentile="mean",
+                metrics_time_unit=metrics_time_unit,
+                task=task,
+            )
+            tts_config = (
+                PlotConfigManager.load_preset("2x4_tts", metrics_time_unit)
+                if task == "text-to-speech"
+                else None
+            )
+            plot_experiment_data_flexible(
+                [
+                    (experiment_metadata, run_data),
+                ],
+                group_key="traffic_scenario",
+                experiment_folder=experiment_folder_abs_path,
+                plot_config=tts_config,
+                metrics_time_unit=metrics_time_unit,
+            )
+            logger.info(
+                f"📁 Please check {experiment_folder_abs_path} "
+                f"for the detailed results, sheets, and plots."
+            )
+        except ImportError as exc:
+            logger.warning(
+                f"‼️ Skipping the Excel/plot summary ({exc.name} is not "
+                f"installed). All raw results are in {experiment_folder_abs_path}. "
+                f"Install it with:  pip install matplotlib openpyxl"
+            )
 
     # Upload experiment results to object storage
     if not upload_results:
@@ -654,20 +772,45 @@ def benchmark(
         f"to {storage_provider_final} bucket: {storage_bucket_final}"
     )
 
+    # Count the files first: upload_folder is a no-op on an empty folder, and
+    # reporting "Successfully uploaded" for zero objects sends the user looking
+    # for results that were never written.
+    num_files = sum(
+        1
+        for file_path in Path(experiment_folder_abs_path).rglob("*")
+        if file_path.is_file()
+    )
+    if num_files == 0:
+        logger.warning(
+            f"‼️ No files found in {experiment_folder_abs_path}, so nothing was "
+            f"uploaded to {storage_provider_final} bucket {storage_bucket_final}."
+        )
+        return
+
     # Upload folder
     storage.upload_folder(
         experiment_folder_abs_path, storage_bucket_final, prefix=storage_prefix_final
     )
 
     logger.info(
-        f"Successfully uploaded experiment results to {storage_provider_final} "
-        f"bucket: {storage_bucket_final}"
+        f"Successfully uploaded {num_files} file(s) of experiment results to "
+        f"{storage_provider_final} bucket: {storage_bucket_final}"
     )
 
 
 cli.add_command(benchmark)
 cli.add_command(excel)
 cli.add_command(plot)
+
+# WebUI is registered lazily: importing it pulls in Flask, which is an
+# optional WebUI dependency. The benchmark/excel/plot commands must keep
+# working in a minimal install where Flask is absent.
+try:  # pragma: no cover - trivial registration
+    from genai_bench.web.cli import webui as _webui_command
+
+    cli.add_command(_webui_command)
+except ImportError:  # Flask / WebUI extras not installed
+    pass
 
 if __name__ == "__main__":
     cli()

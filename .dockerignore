@@ -1,3 +1,18 @@
+### Local-only artifacts (keep the build context small)
+# 1.5 GB of demo models, run results, screenshots and local venvs must never
+# enter the build context: stage 1 copies the whole context with `COPY . .`.
+tools/local_models/
+tools/logs/
+genai_bench_experiments/
+experiments/
+local_models/
+docs/demo/
+.pytest_cache/
+.venv/
+venv/
+# NOTE: frontend/ is intentionally NOT ignored -- stage 1 runs
+# `node frontend/build.mjs` and needs it.
+
 ### Python template
 # Byte-compiled / optimized / DLL files
 __pycache__/

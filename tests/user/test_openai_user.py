@@ -691,6 +691,90 @@ def test_parse_chat_response_reasoning_tokens_in_usage(mock_post, mock_openai_us
 
 
 @patch("genai_bench.user.openai_user.requests.post")
+def test_streaming_error_without_code_is_reported_as_failure(
+    mock_post, mock_openai_user
+):
+    """An error chunk without a "code" must still be a failure.
+
+    error_code is the success/failure discriminator used by the metrics
+    collector. When it is None the record is treated as a successful request
+    and the failure silently disappears from error_rate.
+    """
+    mock_openai_user.environment.sampler = MagicMock()
+    mock_openai_user.environment.sampler.get_token_length = (
+        lambda text, add_special_tokens=True: len(text)
+    )
+    mock_openai_user.on_start()
+    mock_openai_user.sample = lambda: UserChatRequest(
+        model="gpt-3",
+        prompt="Hello",
+        num_prefill_tokens=5,
+        additional_request_params={},
+        max_tokens=10,
+    )
+
+    response_mock = MagicMock()
+    # The failure arrives mid-stream, so the HTTP status is still 200.
+    response_mock.status_code = 200
+    response_mock.iter_lines = MagicMock(
+        return_value=[
+            b'data: {"error": {"message": "model overloaded"}}',
+            b"data: [DONE]",
+        ]
+    )
+    mock_post.return_value = response_mock
+
+    response = mock_openai_user.send_request(
+        stream=True,
+        endpoint="/v1/test",
+        payload={"key": "value"},
+        num_prefill_tokens=5,
+        parse_strategy=mock_openai_user.parse_chat_response,
+    )
+
+    assert response.status_code == 500
+    assert response.error_message == "model overloaded"
+
+
+@patch("genai_bench.user.openai_user.requests.post")
+def test_streaming_error_keeps_explicit_code(mock_post, mock_openai_user):
+    """An error chunk that carries a code keeps that code."""
+    mock_openai_user.environment.sampler = MagicMock()
+    mock_openai_user.environment.sampler.get_token_length = (
+        lambda text, add_special_tokens=True: len(text)
+    )
+    mock_openai_user.on_start()
+    mock_openai_user.sample = lambda: UserChatRequest(
+        model="gpt-3",
+        prompt="Hello",
+        num_prefill_tokens=5,
+        additional_request_params={},
+        max_tokens=10,
+    )
+
+    response_mock = MagicMock()
+    response_mock.status_code = 200
+    response_mock.iter_lines = MagicMock(
+        return_value=[
+            b'data: {"error": {"code": 429, "message": "rate limited"}}',
+            b"data: [DONE]",
+        ]
+    )
+    mock_post.return_value = response_mock
+
+    response = mock_openai_user.send_request(
+        stream=True,
+        endpoint="/v1/test",
+        payload={"key": "value"},
+        num_prefill_tokens=5,
+        parse_strategy=mock_openai_user.parse_chat_response,
+    )
+
+    assert response.status_code == 429
+    assert response.error_message == "rate limited"
+
+
+@patch("genai_bench.user.openai_user.requests.post")
 def test_sgl_model_format(mock_post, mock_openai_user):
     """Test handling of sgl-model format chunks."""
     mock_openai_user.environment.sampler = MagicMock()

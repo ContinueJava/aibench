@@ -19,16 +19,33 @@ def mock_runner():
     return runner
 
 
+def _fake_monotonic(step=1.0):
+    """Monotonic clock that advances by `step` on every call.
+
+    `manage_run_time` measures wall-clock time, so the sleeps have to move a
+    fake clock too instead of only patching `gevent.sleep`.
+    """
+    ticks = [0.0]
+
+    def _monotonic():
+        value = ticks[0]
+        ticks[0] += step
+        return value
+
+    return _monotonic
+
+
 @patch("gevent.sleep", return_value=None)
 def test_exit_based_on_max_run_time(mock_sleep, mock_environment):
     mock_requests = PropertyMock(side_effect=[10, 20, 30, 40, 50])
     type(mock_environment.runner.stats.total).num_requests = mock_requests
 
-    total_run_time = manage_run_time(
-        max_time_per_run=5,
-        max_requests_per_run=1000,
-        environment=mock_environment,
-    )
+    with patch("genai_bench.cli.utils.time.monotonic", side_effect=_fake_monotonic()):
+        total_run_time = manage_run_time(
+            max_time_per_run=5,
+            max_requests_per_run=1000,
+            environment=mock_environment,
+        )
 
     assert total_run_time == 5  # Should run for 5 secs since max run time is reached
 
@@ -38,13 +55,39 @@ def test_exit_based_on_max_requests(mock_sleep, mock_environment):
     mock_requests = PropertyMock(side_effect=[50, 100, 150])
     type(mock_environment.runner.stats.total).num_requests = mock_requests
 
-    total_run_time = manage_run_time(
-        max_time_per_run=600,
-        max_requests_per_run=150,
-        environment=mock_environment,
-    )
+    with patch("genai_bench.cli.utils.time.monotonic", side_effect=_fake_monotonic()):
+        total_run_time = manage_run_time(
+            max_time_per_run=600,
+            max_requests_per_run=150,
+            environment=mock_environment,
+        )
 
     assert total_run_time == 3  # Should exit after 3 secs when 150 requests are reached
+
+
+@patch("gevent.sleep", return_value=None)
+def test_run_time_uses_wall_clock_not_iteration_count(mock_sleep, mock_environment):
+    """A slow tick must not be reported as a single second.
+
+    gevent.sleep(1) is only a lower bound; when the loop is starved the
+    reported duration used to be the number of iterations, which understated
+    the real run time written into the result file name.
+    """
+    mock_requests = PropertyMock(return_value=0)
+    type(mock_environment.runner.stats.total).num_requests = mock_requests
+
+    with patch(
+        "genai_bench.cli.utils.time.monotonic", side_effect=_fake_monotonic(step=4.0)
+    ):
+        total_run_time = manage_run_time(
+            max_time_per_run=8,
+            max_requests_per_run=10**9,
+            environment=mock_environment,
+        )
+
+    # Two ticks of 4s each cover the 8s budget; counting iterations would
+    # have reported 2.
+    assert total_run_time >= 8
 
 
 @pytest.fixture

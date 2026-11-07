@@ -15,6 +15,7 @@ from genai_bench.sampling.base import Sampler
 from genai_bench.scenarios.base import (
     EmbeddingDistribution,
     MultiModality,
+    ReRankDistribution,
     Scenario,
     TextDistribution,
 )
@@ -244,6 +245,14 @@ class TextSampler(Sampler):
         """Generate text from the dataset with exactly num_chars characters."""
         text = ""
         data_copy = self.data.copy()
+        usable_lines = [line.strip() for line in data_copy if line.strip()]
+        if num_chars > 0 and not usable_lines:
+            # Same inescapable loop as _generate_text_by_tokens: shuffling an
+            # empty (or all-blank) dataset never grows `text`.
+            raise ValueError(
+                "Cannot generate text: the dataset is empty. Provide a dataset "
+                "with at least one non-empty prompt line."
+            )
         while len(text) < num_chars:
             random.shuffle(data_copy)
             for line in data_copy:
@@ -283,12 +292,15 @@ class TextSampler(Sampler):
                 f"Expected EmbeddingDistribution for embeddings output, got "
                 f"{type(scenario.scenario_type)}"
             )
-        elif self.output_modality == "image" and not isinstance(
-            scenario.scenario_type, MultiModality
+        elif self.output_modality == "image" and not (
+            scenario.scenario_type == MultiModality.IMAGE
         ):
+            # `isinstance(..., MultiModality)` also accepts AUDIO, so
+            # --task text-to-image --traffic-scenario A(1000) passed validation
+            # and then failed at unpack time for every single request.
             raise ValueError(
-                f"Expected MultiModality (I) for image output, got "
-                f"{type(scenario.scenario_type)}"
+                f"Expected MultiModality.IMAGE (I) for image output, got "
+                f"{scenario.scenario_type}"
             )
         elif (
             self.output_modality == "speech"
@@ -297,6 +309,17 @@ class TextSampler(Sampler):
             raise ValueError(
                 f"Expected MultiModality.AUDIO for speech output, got "
                 f"{scenario.scenario_type}"
+            )
+        elif self.output_modality == "rerank" and not isinstance(
+            scenario.scenario_type, ReRankDistribution
+        ):
+            # Without this branch a rerank run accepted E(...) (int, unpack
+            # fails) or I(...) (3-tuple, unpack fails) and silently treated
+            # D(n,m) as R(n,m), i.e. reinterpreted the user's scenario.
+            raise ValueError(
+                f"Expected ReRankDistribution (R) for rerank output, got "
+                f"{scenario.scenario_type}. Use a rerank scenario such as "
+                f"R(1024,100)."
             )
 
     def _sample_text(
@@ -317,8 +340,14 @@ class TextSampler(Sampler):
         Returns:
             str: A text prompt containing the desired number of tokens.
         """
-        if not num_input_tokens:
+        if num_input_tokens is None:
             return random.choice(self.data)
+        if num_input_tokens == 0:
+            # `not num_input_tokens` used to catch 0 as well, so a D(0,...) or
+            # E(0) scenario returned a whole random line instead of an empty
+            # prompt: the benchmark measured a completely different workload
+            # than the one that was requested.
+            return ""
 
         # Fixed seed ensures multi-worker consistency; prefix_len in seed
         # avoids cross-scenario cache overlap when prefix lengths differ.
@@ -400,6 +429,15 @@ class TextSampler(Sampler):
         if num_tokens == 0:
             return ""
 
+        if not self.data:
+            # An empty dataset makes the loop below spin forever: shuffle([])
+            # and the inner for-loop both do nothing, so tokens_remaining never
+            # decreases. Fail loudly instead of hanging the whole benchmark.
+            raise ValueError(
+                "Cannot generate text: the dataset is empty. Provide a dataset "
+                "with at least one non-empty prompt line."
+            )
+
         data_copy = self.data.copy()
         text = ""
         tokens_remaining = num_tokens
@@ -422,7 +460,11 @@ class TextSampler(Sampler):
                     text += (" " if text else "") + truncated_text
                     return text
 
-                text += line
+                # Join with a space: lines are stripped by the loaders, so
+                # concatenating them directly fuses the last word of one line
+                # with the first word of the next, and the token count of the
+                # joined text no longer equals the sum of the per-line counts.
+                text += (" " if text else "") + line
                 tokens_remaining -= num_line_tokens
 
         return text
@@ -447,9 +489,15 @@ class TextSampler(Sampler):
         """
         discrepancy = abs(num_input_tokens - num_prefill_tokens)
         if discrepancy > threshold * num_input_tokens:
+            # Keyed by the scenario values, not by a single global key: with
+            # one shared key only the very first discrepancy of the whole run
+            # was ever reported and every later one dropped to debug level.
             warning_once(
                 logger,
-                "sampling_discrepancy_detected",
+                (
+                    "sampling_discrepancy_detected_"
+                    f"{threshold}_{num_input_tokens}_{num_prefill_tokens}"
+                ),
                 f"🚨 Sampling discrepancy detected: "
                 f"num_input_tokens={num_input_tokens}, "
                 f"num_prefill_tokens={num_prefill_tokens}, "

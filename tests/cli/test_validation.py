@@ -23,6 +23,7 @@ from genai_bench.cli.validation import (
     validate_tokenizer,
     validate_traffic_scenario_callback,
     validate_warmup_cooldown_ratio_options,
+    validate_warmup_ratio_options,
 )
 from genai_bench.user.oci_cohere_user import OCICohereUser
 from genai_bench.user.oci_cohere_v2_user import OCICohereV2User
@@ -439,6 +440,63 @@ def test_validate_iteration_params_with_defaults():
         assert ctx.params["num_concurrency"] == [1]
 
 
+def test_validate_iteration_params_honours_explicit_concurrency():
+    """
+    Batch-style tasks must keep an explicitly passed --num-concurrency.
+
+    This is what lets a user compare "batch 10 x 10 concurrent" against
+    "batch 2 x 50 concurrent": the iteration dimension stays batch_size, but
+    the fixed worker count is no longer forced to 1.
+    """
+    from click.core import ParameterSource
+
+    for task in ("text-to-embeddings", "text-to-rerank"):
+        ctx = click.Context(click.Command("test"))
+        ctx.params = {
+            "task": task,
+            "num_concurrency": [50],
+            "batch_size": [2],
+        }
+        # simulate `--num-concurrency 50` typed on the command line
+        ctx.set_parameter_source("num_concurrency", ParameterSource.COMMANDLINE)
+
+        result = validate_iteration_params(ctx, None, "num_concurrency")
+
+        assert result == "batch_size"
+        assert ctx.params["batch_size"] == [2]
+        assert ctx.params["num_concurrency"] == [50]
+
+        # ...while omitting it still yields the historical single-worker default
+        ctx_default = click.Context(click.Command("test"))
+        ctx_default.params = {
+            "task": task,
+            "num_concurrency": [50],
+            "batch_size": [2],
+        }
+        ctx_default.set_parameter_source(
+            "num_concurrency", ParameterSource.DEFAULT
+        )
+        validate_iteration_params(ctx_default, None, "num_concurrency")
+        assert ctx_default.params["num_concurrency"] == [1]
+
+
+def test_get_run_params_threads_fixed_concurrency():
+    """get_run_params must use the fixed concurrency in batch_size mode."""
+    from genai_bench.cli.utils import get_run_params
+
+    header, batch, concurrency = get_run_params("batch_size", 10, 10)
+    assert (header, batch, concurrency) == ("Batch Size", 10, 10)
+
+    header, batch, concurrency = get_run_params("batch_size", 2, 50)
+    assert (header, batch, concurrency) == ("Batch Size", 2, 50)
+
+    # default stays backwards compatible
+    assert get_run_params("batch_size", 8) == ("Batch Size", 8, 1)
+
+    # concurrency iteration mode is untouched
+    assert get_run_params("num_concurrency", 32, 7) == ("Concurrency", 1, 32)
+
+
 def test_validate_object_storage_options():
     """Test validation of object storage options."""
     # Mock Click context and param
@@ -560,6 +618,35 @@ def test_validate_warmup_cooldown_ratio_options():
             "cooldown_ratio": 0.5,
         }
         validate_warmup_cooldown_ratio_options(ctx, param, 0.5)
+
+
+def test_validate_warmup_ratio_options():
+    """--warmup-ratio must also validate the combined ratio.
+
+    Click runs option callbacks in command line order, so validating only from
+    the --cooldown-ratio callback let `--cooldown-ratio 0.6 --warmup-ratio 0.6`
+    through. Both options now carry a callback.
+    """
+    ctx = MagicMock()
+    param = MagicMock()
+
+    # Valid: warmup alone
+    ctx.params = {}
+    validate_warmup_ratio_options(ctx, param, 0.5)
+
+    # Valid: warmup + already parsed cooldown
+    ctx.params = {"cooldown_ratio": 0.2}
+    validate_warmup_ratio_options(ctx, param, 0.5)
+
+    # Invalid: sum >= 1.0
+    ctx.params = {"cooldown_ratio": 0.6}
+    with pytest.raises(click.BadParameter):
+        validate_warmup_ratio_options(ctx, param, 0.6)
+
+    # Invalid: sum == 1.0 exactly
+    ctx.params = {"cooldown_ratio": 0.5}
+    with pytest.raises(click.BadParameter):
+        validate_warmup_ratio_options(ctx, param, 0.5)
 
 
 def test_validate_prefix_len_with_dataset_scenario():

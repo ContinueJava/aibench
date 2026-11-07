@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import click
+from click.core import ParameterSource
 from huggingface_hub.utils import HfHubHTTPError
 from transformers import AutoTokenizer
 
@@ -13,14 +14,51 @@ from genai_bench.user.aws_bedrock_user import AWSBedrockUser
 from genai_bench.user.azure_openai_user import AzureOpenAIUser
 from genai_bench.user.cohere_user import CohereUser
 from genai_bench.user.gcp_vertex_user import GCPVertexUser
-from genai_bench.user.oci_cohere_user import OCICohereUser
-from genai_bench.user.oci_cohere_v2_user import OCICohereV2User
-from genai_bench.user.oci_genai_user import OCIGenAIUser
-from genai_bench.user.oci_openai_user import OCIOpenAIUser
 from genai_bench.user.openai_user import OpenAIUser
 from genai_bench.user.together_user import TogetherUser
 
 logger = init_logger(__name__)
+
+
+class _UnavailableOCIUser:
+    """Stand-in for an OCI backend when the optional OCI SDK is not installed.
+
+    The SDK is a 400+ MB optional extra (`pip install genai-bench[oci]`) used by
+    only four backends. Keeping the names/BACKEND_NAME values here preserves the
+    validation tables (so `--api-backend oci-*` still gets a clear message), while
+    instantiating the class fails with an actionable install hint instead of an
+    obscure ModuleNotFoundError from somewhere inside locust.
+    """
+
+    BACKEND_NAME = ""
+
+    def __init__(self, *args, **kwargs):
+        raise click.ClickException(
+            f"Backend '{self.BACKEND_NAME}' needs the optional OCI SDK, which is "
+            "not installed.\nInstall it with:  pip install 'genai-bench[oci]'"
+        )
+
+
+def _load_oci_users():
+    """Import the OCI user classes, or degrade to placeholder classes."""
+    try:
+        from genai_bench.user.oci_cohere_user import OCICohereUser
+        from genai_bench.user.oci_cohere_v2_user import OCICohereV2User
+        from genai_bench.user.oci_genai_user import OCIGenAIUser
+        from genai_bench.user.oci_openai_user import OCIOpenAIUser
+
+        return OCIOpenAIUser, OCICohereUser, OCICohereV2User, OCIGenAIUser
+    except ImportError:  # pragma: no cover - depends on installed extras
+        stubs = []
+        for name in ("oci-openai", "oci-cohere", "oci-cohere-v2", "oci-genai"):
+            stubs.append(type(name.replace("-", "_"), (_UnavailableOCIUser,), {
+                "BACKEND_NAME": name,
+            }))
+        return tuple(stubs)
+
+
+OCIOpenAIUser, OCICohereUser, OCICohereV2User, OCIGenAIUser = _load_oci_users()
+
 
 API_BACKEND_USER_MAP = {
     OpenAIUser.BACKEND_NAME: OpenAIUser,
@@ -186,14 +224,17 @@ def validate_tokenizer(model_tokenizer):
         is_auth_error = False
 
         if isinstance(e, OSError):
-            if (
-                "gated repo" in str(e)
-                or "private repository" in str(e)
-                and "make sure to pass a token" in str(e)
+            # `and` binds tighter than `or`, so the original unparenthesised
+            # expression only matched "private repository" when it was also
+            # followed by "make sure to pass a token" -- in practice only the
+            # "gated repo" case was ever detected. Parenthesise the second
+            # condition so both phrasings are recognised.
+            if "gated repo" in str(e) or (
+                "private repository" in str(e) and "make sure to pass a token" in str(e)
             ):
                 is_auth_error = True
         elif isinstance(e, HfHubHTTPError) and e.response is not None:
-            is_auth_error = e.response.status_code in {401, 403, 404}
+            is_auth_error = e.response.status_code in {401, 403}
 
         if is_auth_error and hf_token is None:
             raise click.BadParameter(
@@ -201,13 +242,49 @@ def validate_tokenizer(model_tokenizer):
                 "Please export HF_TOKEN with a valid access token and retry."
             ) from e
 
+        if is_auth_error and hf_token is not None:
+            # A token was supplied but it did not grant access. Previously this
+            # fell through to a bare `raise`, so the user saw the raw hub error
+            # even though the actionable advice is to replace HF_TOKEN.
+            raise click.BadParameter(
+                "Hugging Face rejected the supplied HF_TOKEN for this tokenizer. "
+                "Please check that it has access to the model and retry."
+            ) from e
+
         # Propagate all other errors unchanged
         raise
+
+
+def _is_explicitly_set(ctx, name: str) -> bool:
+    """
+    Return True when the user passed ``name`` on the command line.
+
+    ``--num-concurrency`` has a non-empty CLI default, so "was it left empty?"
+    cannot tell a default apart from an explicit value. Click's parameter
+    source can, and it degrades to False for hand-built contexts (tests).
+    """
+    getter = getattr(ctx, "get_parameter_source", None)
+    if getter is None:
+        return False
+    try:
+        source = getter(name)
+    except (KeyError, AttributeError):
+        return False
+    return source is not None and source != ParameterSource.DEFAULT
 
 
 def validate_iteration_params(ctx, param, value) -> str:
     """
     Validate and determine iteration parameters based on task type.
+
+    Batch-style tasks (text-to-embeddings / text-to-rerank) iterate over
+    ``--batch-size``; every other task iterates over ``--num-concurrency``.
+
+    The *iteration* dimension is imposed by the task, but the other dimension
+    is not: an explicitly passed ``--num-concurrency`` is honoured as a fixed
+    concurrency for batch-style tasks (it defaults to 1 when omitted), which
+    is what makes "batch 10 x 10 concurrent" comparable with "batch 2 x 50
+    concurrent".
 
     Args:
         ctx: Click context
@@ -227,7 +304,11 @@ def validate_iteration_params(ctx, param, value) -> str:
             click.echo("Note: Using batch_size iteration for text-to-embeddings task")
         batch_size = batch_size or DEFAULT_BATCH_SIZES
         value = "batch_size"
-        num_concurrency = [1]
+        # Honour an explicitly passed --num-concurrency as a fixed concurrency
+        # (this is what makes "batch 10 x 10 concurrent" expressible); fall
+        # back to the historical single-worker default when it is omitted.
+        if not (_is_explicitly_set(ctx, "num_concurrency") and num_concurrency):
+            num_concurrency = [1]
 
     # For all other tasks, use num_concurrency iteration
     else:
@@ -293,8 +374,21 @@ def validate_api_key(ctx, param, value):
 
     # Azure OpenAI can use API key or Azure AD
     if api_backend in api_key_required:
+        # Several deployment modes (e.g. the WebUI) supply the key through an
+        # environment variable instead of the command line, which is also what
+        # --model-api-key reads. Accept that as satisfying the requirement so
+        # the key never has to appear in argv, logs or the persisted cmd line.
+        # Return None so the credential is picked up from --model-api-key's
+        # envvar by the auth factory; explicitly passing --api-key still wins.
         if not value:
-            raise click.BadParameter(f"API key is required for {api_backend} backend")
+            env_key = os.environ.get("MODEL_API_KEY") or os.environ.get(
+                "OPENAI_API_KEY"
+            )
+            if not env_key:
+                raise click.BadParameter(
+                    f"API key is required for {api_backend} backend"
+                )
+            return None
     elif api_backend == AzureOpenAIUser.BACKEND_NAME:
         # Azure can use API key or Azure AD - validated in model auth options
         pass
@@ -423,6 +517,27 @@ def validate_warmup_cooldown_ratio_options(ctx, param, value):
     """Validate warmup and cooldown options."""
     warmup_ratio = ctx.params.get("warmup_ratio") or 0.0
     cooldown_ratio = value or 0.0
+    if warmup_ratio + cooldown_ratio >= 1.0:
+        raise click.BadParameter(
+            f"warmup_ratio({warmup_ratio}) + cooldown_ratio({cooldown_ratio}) "
+            f"must be < 1.0.",
+            param_hint=["--warmup-ratio", "--cooldown-ratio"],
+        )
+    return value
+
+
+def validate_warmup_ratio_options(ctx, param, value):
+    """Validate --warmup-ratio together with the already parsed --cooldown-ratio.
+
+    Click evaluates option callbacks in the order the options appear on the
+    command line, so a callback attached to a single option cannot see the other
+    one reliably: with `--cooldown-ratio 0.6 --warmup-ratio 0.6` the validation
+    used to pass, because the cooldown callback ran before warmup was parsed.
+    Both options now carry a callback, so whichever comes last performs the
+    combined check.
+    """
+    cooldown_ratio = ctx.params.get("cooldown_ratio") or 0.0
+    warmup_ratio = value or 0.0
     if warmup_ratio + cooldown_ratio >= 1.0:
         raise click.BadParameter(
             f"warmup_ratio({warmup_ratio}) + cooldown_ratio({cooldown_ratio}) "

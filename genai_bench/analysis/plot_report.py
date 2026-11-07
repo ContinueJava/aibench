@@ -8,6 +8,7 @@ import matplotlib.ticker as mticker
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 
 from genai_bench.analysis.experiment_loader import ExperimentMetrics, MetricsData
 from genai_bench.logging import init_logger
@@ -131,6 +132,9 @@ def plot_metrics(
     """
     for i, concurrency_data in enumerate(concurrency_data_list):
         concurrency_levels = label_to_concurrency_map[labels[i]]
+        # The values are already converted to the requested unit by the
+        # caller; only the axis labels were hardcoded to seconds.
+        unit_label = metrics_time_unit
 
         # Define all plot specifications in a single list
         plot_specs = [  # type: ignore[union-attr,index]
@@ -182,7 +186,7 @@ def plot_metrics(
                     for c in concurrency_levels
                 ],
                 "x_label": "RPS (req/s)",
-                "y_label": "Mean E2E Latency per Request (s)",
+                "y_label": f"Mean E2E Latency per Request ({unit_label})",
                 "title": "Mean E2E Latency per Request vs RPS",
                 "plot_type": "line",
                 "ax": axs[0, 2],
@@ -235,7 +239,7 @@ def plot_metrics(
                     for c in concurrency_levels
                 ],
                 "x_label": "RPS (req/s)",
-                "y_label": "P90 E2E Latency per Request (s)",
+                "y_label": f"P90 E2E Latency per Request ({unit_label})",
                 "title": "P90 E2E Latency per Request vs RPS",
                 "plot_type": "line",
                 "ax": axs[1, 2],
@@ -250,27 +254,37 @@ def plot_metrics(
                     for c in concurrency_levels
                 ],
                 "x_label": "RPS (req/s)",
-                "y_label": "P99 E2E Latency per Request (s)",
+                "y_label": f"P99 E2E Latency per Request ({unit_label})",
                 "title": "P99 E2E Latency per Request vs RPS",
                 "plot_type": "line",
                 "ax": axs[1, 3],
             },
         ]
 
-        # Generate all plots
+        # Generate all plots. A missing metric (an all-error run leaves the
+        # statistics None) used to abort the whole figure, so skip only the
+        # affected panel and keep the rest of the report.
         for spec in plot_specs:
-            plot_graph(
-                ax=spec["ax"],
-                x_data=spec["x_data"],
-                y_data=spec["y_data"],
-                x_label=spec["x_label"],
-                y_label=spec["y_label"],
-                title=spec["title"],
-                concurrency_levels=concurrency_levels,
-                label=labels[i],
-                plot_type=spec["plot_type"],
-                metrics_time_unit=metrics_time_unit,
-            )
+            try:
+                plot_graph(
+                    ax=spec["ax"],
+                    x_data=spec["x_data"],
+                    y_data=spec["y_data"],
+                    x_label=spec["x_label"],
+                    y_label=spec["y_label"],
+                    title=spec["title"],
+                    concurrency_levels=concurrency_levels,
+                    label=labels[i],
+                    plot_type=spec["plot_type"],
+                    metrics_time_unit=metrics_time_unit,
+                )
+            except (KeyError, AttributeError) as e:
+                logger.warning(
+                    f"‼️ Skipping plot '{spec['title']}' for {labels[i]}: "
+                    f"required metric missing ({e}). This usually means the "
+                    f"run had no successful requests."
+                )
+                continue
 
         # Add stacked error rate plot
         plot_error_rates(
@@ -411,6 +425,16 @@ def get_scenario_data(
     return label_to_concurrency_map, concurrency_data_list, labels
 
 
+def _dedupe_label(label: str, existing: Dict[str, Any]) -> str:
+    """Return `label`, suffixed with a counter if it is already taken."""
+    if label not in existing:
+        return label
+    counter = 2
+    while f"{label} #{counter}" in existing:
+        counter += 1
+    return f"{label} #{counter}"
+
+
 def get_group_data(
     run_data_list: List[Tuple[ExperimentMetadata, ExperimentMetrics]],
     traffic_scenario: str,
@@ -436,13 +460,28 @@ def get_group_data(
     for metadata, run_data in run_data_list:
         if traffic_scenario not in run_data:
             continue
-        group_label = getattr(metadata, group_key, "Unknown")
+        if not hasattr(metadata, group_key):
+            # getattr(..., "Unknown") used to swallow typos like
+            # --group-key traffic_scenrio and silently collapse every
+            # experiment into one group called "None: Unknown".
+            raise ValueError(
+                f"Unknown group key '{group_key}'. It is not a field of "
+                f"ExperimentMetadata. Use one of "
+                f"{', '.join(sorted(ExperimentMetadata.model_fields))} "
+                f"or 'experiment_folder_name'."
+            )
+        group_label = getattr(metadata, group_key)
 
         # extra base folder name from abspath
         if group_key == "experiment_folder_name":
             group_label = os.path.basename(group_label)
 
         label = f"{group_key}: {group_label}"
+        # Two experiments can share a group label (same model, same scenario).
+        # The dict assignment used to overwrite the earlier entry while the
+        # label list kept both, so plot_metrics drew both curves with the last
+        # experiment's concurrency levels. Keep the labels unique instead.
+        label = _dedupe_label(label, label_to_concurrency_map)
         label_to_concurrency_map[label] = sorted(run_data[traffic_scenario].keys())
         concurrency_data_list.append(run_data[traffic_scenario])
         labels.append(label)
@@ -501,6 +540,59 @@ def finalize_and_save_plots(
     plt.close()
 
 
+def copy_plot_artists(src_ax: Any, dest_ax: Any) -> None:
+    """Re-draw the primitives of ``src_ax`` onto ``dest_ax``.
+
+    ``save_individual_subplots`` used to copy only ``ax.get_lines()``, so any
+    subplot drawn with bars or scatter markers came out blank in the individual
+    PNG (the combined figure was fine because it is saved from the original
+    axes). Copy the common artist types instead of relying on a single one.
+    """
+    # Lines first: errorbar/candlestick style plots rely on them.
+    for line in src_ax.get_lines():
+        dest_ax.plot(
+            line.get_xdata(),
+            line.get_ydata(),
+            label=line.get_label(),
+            marker=line.get_marker(),
+            linestyle=line.get_linestyle(),
+            color=line.get_color(),
+        )
+
+    # Bar charts: Rectangle patches with a data-space xy and width/height.
+    for patch in getattr(src_ax, "patches", []):
+        if not isinstance(patch, Rectangle):
+            continue
+        dest_ax.add_patch(
+            Rectangle(
+                patch.get_xy(),
+                patch.get_width(),
+                patch.get_height(),
+                facecolor=patch.get_facecolor(),
+                edgecolor=patch.get_edgecolor(),
+                linewidth=patch.get_linewidth(),
+                alpha=patch.get_alpha(),
+                label=patch.get_label(),
+            )
+        )
+
+    # Scatter markers: PathCollections carry their points in the offsets.
+    for collection in getattr(src_ax, "collections", []):
+        if not hasattr(collection, "get_offsets"):
+            continue
+        offsets = collection.get_offsets()
+        sizes = collection.get_sizes()
+        dest_ax.scatter(
+            offsets[:, 0],
+            offsets[:, 1],
+            s=sizes if len(sizes) else None,
+            facecolor=collection.get_facecolor(),
+            edgecolor=collection.get_edgecolor(),
+            alpha=collection.get_alpha(),
+            label=collection.get_label(),
+        )
+
+
 def save_individual_subplots(
     axs: Any, experiment_folder: str, output_file_prefix: str
 ) -> None:
@@ -520,13 +612,7 @@ def save_individual_subplots(
         fig_temp, ax_temp = plt.subplots()
 
         # Copy the content of the original axis to the new axis
-        for line in ax.get_lines():
-            ax_temp.plot(
-                line.get_xdata(),
-                line.get_ydata(),
-                label=line.get_label(),
-                marker=line.get_marker(),
-            )
+        copy_plot_artists(ax, ax_temp)
 
         # Copy each annotation from the original axis to the new axis
         for annotation in ax.texts:

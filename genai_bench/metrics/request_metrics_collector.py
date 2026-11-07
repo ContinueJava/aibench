@@ -87,17 +87,29 @@ class RequestMetricsCollector:
             self.metrics.tpot = self.metrics.output_latency / (
                 self.metrics.num_output_tokens - 1
             )
-            self.metrics.output_inference_speed = 1 / self.metrics.tpot
+            # output_latency can be 0 when the first and the last token arrive
+            # in the same chunk (TCP buffering, cached responses, ...). In that
+            # case tpot is 0 and 1/tpot would raise ZeroDivisionError, so guard
+            # it the same way output_throughput is guarded below.
+            self.metrics.output_inference_speed = (
+                1 / self.metrics.tpot if self.metrics.tpot else 0
+            )
             self.metrics.output_throughput = (
                 (self.metrics.num_output_tokens - 1) / self.metrics.output_latency
                 if self.metrics.output_latency
                 else 0
             )
         else:
+            # TPOT and the throughputs derived from it are undefined for a
+            # single output token: both divide by (num_output_tokens - 1).
+            # Leave them as None so aggregation skips them, and warn loudly:
+            # the request still counts as completed, so the sample size of the
+            # output metrics silently shrinks otherwise.
             logger.warning(
                 f"‼️ num_output_tokens:"
-                f"{self.metrics.num_output_tokens} is <= 1. Please check"
-                f" your server and request!"
+                f"{self.metrics.num_output_tokens} is <= 1, so tpot, inference "
+                f"speed and output throughput are undefined for this request. "
+                f"Please check your server and request!"
             )
 
     def _reset_output_metrics(self):

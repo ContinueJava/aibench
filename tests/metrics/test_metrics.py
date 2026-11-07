@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from genai_bench.metrics.aggregated_metrics_collector import AggregatedMetricsCollector
-from genai_bench.metrics.metrics import RequestLevelMetrics
+from genai_bench.metrics.metrics import AggregatedMetrics, RequestLevelMetrics
 from genai_bench.metrics.request_metrics_collector import RequestMetricsCollector
 from genai_bench.protocol import UserChatResponse, UserResponse
 
@@ -156,6 +156,11 @@ def test_event_aggregation(aggregated_metrics_collector, locust_environment):
     # Check metadata calculations
     assert aggregated_metrics.num_requests == 3
     assert aggregated_metrics.num_completed_requests == 2
+    assert aggregated_metrics.num_error_requests == 1
+    assert aggregated_metrics.error_codes_frequency == {500: 1}
+    # error_rate must be derived from num_requests, which has to be computed
+    # before the division, otherwise it is always 0.
+    assert aggregated_metrics.error_rate == pytest.approx(1 / 3)
     assert aggregated_metrics.mean_input_throughput_tokens_per_s == pytest.approx(
         3.3333, rel=0.0001
     )
@@ -303,8 +308,19 @@ def test_filter_warmup_and_cooldown_metrics(aggregated_metrics_collector):
     assert aggregated_metrics.stats.output_latency["mean"] == pytest.approx(0.9)
     assert aggregated_metrics.stats.input_throughput["mean"] == pytest.approx(20.0)
     assert aggregated_metrics.stats.output_throughput["mean"] == pytest.approx(11.111)
-    # Check metadata calculations
-    assert aggregated_metrics.num_requests == 10
+    # Check metadata calculations. Only the 8 requests inside the warmup/cooldown
+    # window are aggregated, and the duration shrinks with them so that the
+    # throughput denominator covers the same portion of the run as the numerator.
+    assert aggregated_metrics.num_requests == 8
+    assert aggregated_metrics.num_completed_requests == 8
+    assert aggregated_metrics.run_duration == pytest.approx(0.8)
+    assert aggregated_metrics.mean_input_throughput_tokens_per_s == pytest.approx(
+        8 * 2 / 0.8
+    )
+    assert aggregated_metrics.mean_output_throughput_tokens_per_s == pytest.approx(
+        8 * 10 / 0.8
+    )
+    assert aggregated_metrics.requests_per_second == pytest.approx(8 / 0.8)
 
 
 def test_save_metrics(aggregated_metrics_collector, tmp_path):
@@ -506,3 +522,103 @@ def test_validate_metrics_from_json():
     )
     with pytest.raises(ValueError, match="tpot must not be None if error_code is None"):
         RequestLevelMetrics.model_validate_json(none_value_json)
+
+
+def test_single_output_token_leaves_tpot_family_unset():
+    """A single output token makes tpot/throughput undefined, not an error."""
+    collector = RequestMetricsCollector()
+    response = UserChatResponse(
+        status_code=200,
+        time_at_first_token=1.05,
+        start_time=1.0,
+        end_time=1.10,
+        num_prefill_tokens=10,
+        generated_text="ok",
+        tokens_received=1,
+    )
+    collector.calculate_metrics(response)
+
+    assert collector.metrics.num_output_tokens == 1
+    assert collector.metrics.output_latency == pytest.approx(0.05)
+    # They must stay None so the aggregator skips them instead of crashing
+    assert collector.metrics.tpot is None
+    assert collector.metrics.output_inference_speed is None
+    assert collector.metrics.output_throughput is None
+
+
+def test_zero_output_latency_does_not_raise():
+    """First and last token arriving together must not divide by zero."""
+    collector = RequestMetricsCollector()
+    response = UserChatResponse(
+        status_code=200,
+        time_at_first_token=1.0,
+        start_time=0.9,
+        end_time=1.0,
+        num_prefill_tokens=10,
+        generated_text="hello world",
+        tokens_received=3,
+    )
+    collector.calculate_metrics(response)
+
+    assert collector.metrics.output_latency == 0
+    assert collector.metrics.tpot == 0
+    assert collector.metrics.output_inference_speed == 0
+    assert collector.metrics.output_throughput == 0
+
+
+def test_all_requests_failed_aggregation_reports_error_rate(
+    aggregated_metrics_collector,
+):
+    """A run where every request failed must report error_rate, not crash."""
+    aggregated_metrics_collector.set_run_metadata(
+        iteration=1,
+        scenario_str="D(100,100)",
+        iteration_type="num_concurrency",
+    )
+    for _ in range(3):
+        aggregated_metrics_collector.add_single_request_metrics(
+            RequestLevelMetrics(error_code=500, error_message="Internal Server Error")
+        )
+
+    aggregated_metrics_collector.aggregate_metrics_data(0.0, 10.0, None, None)
+    aggregated_metrics = aggregated_metrics_collector.aggregated_metrics
+
+    assert aggregated_metrics.num_requests == 3
+    assert aggregated_metrics.num_completed_requests == 0
+    assert aggregated_metrics.num_error_requests == 3
+    assert aggregated_metrics.error_rate == 1.0
+    assert aggregated_metrics.error_codes_frequency == {500: 3}
+    # Statistics stay empty instead of raising ValueError
+    assert aggregated_metrics.stats.ttft["mean"] is None
+
+
+def test_aggregated_metrics_model_dump_forwards_kwargs():
+    """model_dump used to drop its arguments, ignoring exclude_none and friends."""
+    metrics = AggregatedMetrics(
+        scenario="D(100,100)",
+        num_concurrency=2,
+        batch_size=1,
+        run_duration=1.5,
+    )
+    dumped = metrics.model_dump(mode="json")
+    assert dumped["scenario"] == "D(100,100)"
+    assert isinstance(dumped["stats"], dict)
+
+    # include={"scenario"} must be honoured, which it is only if the keyword
+    # arguments reach pydantic.
+    partial = metrics.model_dump(include={"scenario"})
+    assert set(partial) == {"scenario", "stats"}
+
+
+def test_aggregated_metrics_model_validate_does_not_mutate_input():
+    """Validation must not rewrite the caller's dictionary in place."""
+    metrics = AggregatedMetrics(scenario="D(100,100)", run_duration=2.0)
+    payload = metrics.model_dump()
+    original_stats = payload["stats"]
+
+    validated = AggregatedMetrics.model_validate(payload)
+
+    assert validated.scenario == "D(100,100)"
+    assert validated.run_duration == 2.0
+    assert payload["stats"] is original_stats
+    assert isinstance(payload["stats"], dict)

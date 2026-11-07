@@ -21,6 +21,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import click
 import pandas as pd
 import pytest
 from click.testing import CliRunner
@@ -231,34 +232,31 @@ def test_benchmark_command_with_file_based_sampling(
         # Note: The specific log message may have changed during refactoring
 
 
-@pytest.mark.usefixtures(
-    "mock_env_variables",
-    "mock_dashboard",
-    "mock_validate_tokenizer",
-    "mock_time_sleep",
-    "mock_makedirs",
-    "mock_file_system",
-    "mock_report_and_plot",
-    "mock_http_requests",
-    "mock_experiment_path",
-)
-def test_invalid_server_gpu_type(cli_runner, default_options):
-    result = cli_runner.invoke(
-        benchmark,
-        [
-            *default_options,
-            "--server-engine",
-            "SGLang",
-            "--server-gpu-type",
-            "YYY",  # Invalid GPU type
-            "--server-version",
-            "v0.6.3",
-            "--server-gpu-count",
-            "8",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "Error: Invalid value for '--server-gpu-type'" in result.output
+def test_server_gpu_type_accepts_any_card():
+    """GPU type is annotation-only metadata, so any card name must be accepted.
+
+    It used to be a click.Choice of 8 NVIDIA/AMD SKUs, which made Huawei Ascend,
+    Alibaba Zhenwu/Hanguang, Hygon DCU, Cambricon MLU and Baidu Kunlunxin
+    impossible to record (user m03135: "GPU 类型 这个没有华为，阿里的卡选项").
+    Measured on the option object instead of running a benchmark: with a
+    free-text type any value parses, which is exactly what the closed enum
+    prevented.
+    """
+    opt = next(p for p in benchmark.params if p.name == "server_gpu_type")
+    assert not isinstance(opt.type, click.Choice)
+    assert "Ascend-910B" in opt.help and "Zhenwu-810E" in opt.help
+    # the click type itself accepts vendor cards a closed enum would reject
+    for card in (
+        "Ascend-910B",
+        "Ascend-950PR",
+        "Atlas-300I-Duo",
+        "Zhenwu-810E",
+        "Zhenwu-V900",
+        "Hanguang-800",
+        "Kunlunxin-P800",
+        "YYY",
+    ):
+        assert opt.type.convert(card, None, None) == card
 
 
 @pytest.mark.usefixtures(

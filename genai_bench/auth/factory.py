@@ -1,12 +1,6 @@
 from typing import Optional
 
-import oci.config
-
 from genai_bench.auth.auth_provider import AuthProvider
-from genai_bench.auth.oci.instance_principal import OCIInstancePrincipalAuth
-from genai_bench.auth.oci.obo_token import OCIOBOTokenAuth
-from genai_bench.auth.oci.session import OCISessionAuth
-from genai_bench.auth.oci.user_principal import OCIUserPrincipalAuth
 from genai_bench.auth.openai.auth import OpenAIAuth
 from genai_bench.auth.together.auth import TogetherAuth
 
@@ -41,8 +35,8 @@ class AuthFactory:
     @staticmethod
     def create_oci_auth(
         auth_type: str,
-        config_path: Optional[str] = oci.config.DEFAULT_LOCATION,
-        profile: Optional[str] = oci.config.DEFAULT_PROFILE,
+        config_path: Optional[str] = None,
+        profile: Optional[str] = None,
         token: Optional[str] = None,
         region: Optional[str] = None,
     ) -> AuthProvider:
@@ -79,6 +73,28 @@ class AuthFactory:
                 f"Invalid auth_type: {auth_type}. Must be one of: "
                 f"{', '.join(repr(t) for t in valid_types)}"
             )
+
+        # The OCI SDK is an optional dependency (`pip install genai-bench[oci]`);
+        # import it here so the rest of the CLI works without it installed.
+        try:
+            import oci.config
+
+            from genai_bench.auth.oci.instance_principal import (
+                OCIInstancePrincipalAuth,
+            )
+            from genai_bench.auth.oci.obo_token import OCIOBOTokenAuth
+            from genai_bench.auth.oci.session import OCISessionAuth
+            from genai_bench.auth.oci.user_principal import OCIUserPrincipalAuth
+        except ImportError as exc:  # pragma: no cover - depends on install extras
+            raise ImportError(
+                "OCI authentication requires the optional dependency 'oci'. "
+                "Install it with:  pip install 'genai-bench[oci]'"
+            ) from exc
+
+        if config_path is None:
+            config_path = oci.config.DEFAULT_LOCATION
+        if profile is None:
+            profile = oci.config.DEFAULT_PROFILE
 
         if auth_type == "instance_principal":
             return OCIInstancePrincipalAuth(security_token=token, region=region)

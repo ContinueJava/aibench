@@ -95,8 +95,7 @@ class Scenario(ABC):
         Determines the correct subclass to instantiate using the registered map.
         """
         # Extract leading type token (supports multi-char tokens like "dataset")
-        match = re.match(r"^([A-Za-z]+)", scenario_str)
-        type_token = match.group(1) if match else scenario_str[0]
+        type_token = cls._extract_type_token(scenario_str)
         cls.validate(scenario_str)
         scenario_class = cls._registry.get(type_token)
         assert scenario_class is not None, (
@@ -106,14 +105,32 @@ class Scenario(ABC):
         params_str = scenario_str[len(type_token) :]
         return scenario_class.parse(params_str)
 
+    @staticmethod
+    def _extract_type_token(scenario_str: str) -> str:
+        """Return the leading scenario type token, or raise for empty input.
+
+        The old code fell back to `scenario_str[0]` when the regex did not
+        match, which turned an empty scenario string into an IndexError that
+        `validate_traffic_scenario_callback` could not catch (it only handles
+        ValueError), so the user got a traceback instead of a CLI error.
+        """
+        match = re.match(r"^([A-Za-z]+)", scenario_str)
+        if match:
+            return match.group(1)
+        if not scenario_str:
+            raise ValueError(
+                "Scenario string is empty. Provide a traffic scenario such as "
+                "D(100,100) or N(480,240)/(300,150)."
+            )
+        return scenario_str[0]
+
     @classmethod
     def validate(cls, scenario_str: str) -> bool:
         """
         Scenario string validation method
         Subclass requires validation_pattern to be defined
         """
-        match = re.match(r"^([A-Za-z]+)", scenario_str)
-        type_token = match.group(1) if match else scenario_str[0]
+        type_token = cls._extract_type_token(scenario_str)
         scenario_class = cls._registry.get(type_token)
         if not scenario_class:
             supported = ", ".join(sorted(cls._registry.keys()))

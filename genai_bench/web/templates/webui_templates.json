@@ -1,0 +1,388 @@
+{
+  "version": "3.0",
+  "_comment": "单人版 WebUI 的唯一后端模板配置文件(护栏#6)。改本文件里的推荐值/任务显示名/缩写/title/slug 模板/预设套餐 → 重启后表单与命名一起变, 无需改前端或重新构建。presets/ladders 也在这里: 前端只负责把它们渲染成卡片并一次性串行发起, 不新增后端逻辑。",
+  "naming": {
+    "timezone_label": "Asia/Shanghai",
+    "stamp_full_format": "%Y%m%d-%H%M",
+    "stamp_short_format": "%m%d-%H%M",
+    "run_id_format": "{hex8}-{YYYYMMDD}-{HHMMSS}",
+    "title_template": "{display} · {model_short} · {key_params} · {stamp_short}",
+    "sweep_title_template": "Sweep · {display} · {sweep_key}[{sweep_values}] · {stamp_short}",
+    "slug_template": "{short_code}_{model_short}_{key_slug}_{stamp_full}_{run4}",
+    "slug_forbidden": "/\\?%*:|\"<> ",
+    "slug_max_len": 80,
+    "abbrevs": {
+      "c": "并发",
+      "L": "对话/文档长度",
+      "b": "批大小",
+      "d": "文档长度",
+      "q": "查询长度",
+      "t": "时长(min)",
+      "g": "扫描组"
+    },
+    "export": {
+      "single_zip": "{slug}.zip",
+      "single_csv": "{slug}.csv",
+      "multi_zip": "genai-bench_{N}条_{stamp_full}.zip",
+      "sweep_zip": "genai-bench_{sweep_slug}.zip"
+    }
+  },
+  "metrics": [
+    {"key": "throughput", "label": "吞吐 (req/s)", "agg": "requests_per_second", "unit": "req/s", "better": "max"},
+    {"key": "tokens_throughput", "label": "总吞吐 (tok/s)", "agg": "mean_total_tokens_throughput_tokens_per_s", "unit": "tok/s", "better": "max"},
+    {"key": "p50", "label": "E2E P50", "agg": "stats.e2e_latency.p50", "unit": "s", "better": "min"},
+    {"key": "p99", "label": "E2E P99", "agg": "stats.e2e_latency.p99", "unit": "s", "better": "min"},
+    {"key": "ttft_p50", "label": "TTFT P50", "agg": "stats.ttft.p50", "unit": "s", "better": "min"},
+    {"key": "ttft_p99", "label": "TTFT P99", "agg": "stats.ttft.p99", "unit": "s", "better": "min"},
+    {"key": "error_rate", "label": "错误率", "agg": "error_rate", "unit": "ratio", "better": "min"}
+  ],
+  "durations": [
+    {"value": 2, "label": "预热 2 min", "short": "t2m", "slug": "t2m"},
+    {"value": 10, "label": "稳态 10 min", "short": "t10m", "slug": "t10m"},
+    {"value": 30, "label": "施压 30 min", "short": "t30m", "slug": "t30m"}
+  ],
+  "max_requests_per_run": 2000000000,
+  "common_fields": [
+    {"key": "api_backend", "label": "API 后端", "type": "select", "default": "openai", "cli_flag": "--api-backend", "required": true, "group": "connection", "options": ["openai", "oci-openai", "oci-cohere", "oci-cohere-v2", "oci-genai", "cohere", "aws-bedrock", "azure-openai", "gcp-vertex", "together", "vllm", "sglang"]},
+    {"key": "api_base", "label": "API Base URL", "type": "text", "default": "http://localhost:8000/v1", "cli_flag": "--api-base", "required": true, "group": "connection", "hint": "OpenAI 兼容地址, 写到端口即可，带不带 /v1 都行（后端归一化，引擎自己拼 /v1/...）"},
+    {"key": "api_model_name", "label": "目标模型名", "type": "text", "default": "", "cli_flag": "--api-model-name", "required": true, "group": "connection", "hint": "请求体里的 model 字段"},
+    {"key": "model_tokenizer", "label": "Tokenizer", "type": "text", "default": "", "cli_flag": "--model-tokenizer", "required": true, "group": "connection", "hint": "可在上方『上传本地文件 / 选择使用』中选用本地离线包(无需 HF_TOKEN/联网); 或在此手填 HuggingFace ID / 本地路径, 需与目标服务一致"},
+    {"key": "spawn_rate", "label": "Spawn Rate", "type": "number", "default": null, "cli_flag": "--spawn-rate", "group": "advanced", "low_frequency": true},
+    {"key": "warmup_ratio", "label": "Warmup 比例", "type": "number", "default": null, "cli_flag": "--warmup-ratio", "group": "advanced", "low_frequency": true},
+    {"key": "metrics_time_unit", "label": "指标时间单位", "type": "select", "default": "s", "cli_flag": "--metrics-time-unit", "group": "advanced", "low_frequency": true, "options": ["s", "ms"]},
+    {"key": "server_engine", "label": "服务引擎", "type": "select", "default": null, "cli_flag": "--server-engine", "group": "advanced", "low_frequency": true, "options": ["vLLM", "SGLang", "TGI", "cohere-TensorRT", "cohere-vLLM", "LlamaCPP"]},
+    {"key": "server_version", "label": "服务版本", "type": "text", "default": null, "cli_flag": "--server-version", "group": "advanced", "low_frequency": true},
+    {"key": "server_gpu_type", "label": "GPU 类型", "type": "select", "default": null, "cli_flag": "--server-gpu-type", "group": "advanced", "low_frequency": true, "allow_custom": true, "custom_type": "text", "hint": "纯备注字段, 只写进实验元信息与报表, 不参与任何采样或指标计算。点输入框会展开常见型号（NVIDIA / AMD / 华为昇腾 Ascend / 阿里真武 PPU / 海光 / 寒武纪 / 昆仑芯）, 列表里没有就直接手填, 例如 Ascend-910B3 / Ascend-950PR / Zhenwu-810E", "options": [{"value": "H100", "label": "H100（NVIDIA）"}, {"value": "A100-80G", "label": "A100-80G（NVIDIA）"}, {"value": "A100-40G", "label": "A100-40G（NVIDIA）"}, {"value": "A10", "label": "A10（NVIDIA）"}, {"value": "H200", "label": "H200（NVIDIA）"}, {"value": "B200", "label": "B200（NVIDIA）"}, {"value": "RTX-PRO-6000", "label": "RTX-PRO-6000（NVIDIA）"}, {"value": "MI300", "label": "MI300（AMD）"}, {"value": "Ascend-910B", "label": "Ascend-910B（华为昇腾 · 训练）"}, {"value": "Ascend-910B3", "label": "Ascend-910B3（华为昇腾 · 训练）"}, {"value": "Ascend-910B4", "label": "Ascend-910B4（华为昇腾 · 训练）"}, {"value": "Ascend-910C", "label": "Ascend-910C（华为昇腾 · 训练 800T）"}, {"value": "Ascend-950PR", "label": "Ascend-950PR（华为昇腾 · 2026Q1）"}, {"value": "Ascend-950DT", "label": "Ascend-950DT（华为昇腾 · 2026Q4）"}, {"value": "Ascend-310P", "label": "Ascend-310P（华为昇腾 · 推理）"}, {"value": "Atlas-300I-Duo", "label": "Atlas-300I-Duo（华为昇腾 · 推理卡）"}, {"value": "Atlas-800T-A2", "label": "Atlas-800T-A2（华为昇腾 · 训练服务器）"}, {"value": "Zhenwu-810E", "label": "真武-810E（阿里 PPU · 训推一体 96G）"}, {"value": "Zhenwu-M890", "label": "真武-M890（阿里 PPU · 训推一体 96/144G）"}, {"value": "Zhenwu-V900", "label": "真武-V900（阿里 PPU · 下一代 216G）"}, {"value": "Hanguang-800", "label": "含光-800（阿里 · 推理 NPU）"}, {"value": "Hygon-DCU", "label": "Hygon-DCU（海光）"}, {"value": "MLU-590", "label": "MLU-590（寒武纪）"}, {"value": "Kunlunxin-P800", "label": "Kunlunxin-P800（百度昆仑芯）"}]},
+    {"key": "server_gpu_count", "label": "GPU 数量", "type": "text", "default": null, "cli_flag": "--server-gpu-count", "group": "advanced", "low_frequency": true}
+  ],
+  "ladders": {
+    "_comment": "细粒度施压梯子(护栏#6, 与推荐值同在一个配置文件)。整串套餐前端一次性把这串离散值顺序 POST 到同一个 /api/benchmark/start(同一个 group), 全部进同一条串行队列; 用户可随时『中断本批』。field 是表单字段 key(数值型, 引擎可表示任意整数); x 是对比/拐点图横轴要读的聚合指标字段(chat 用 num_concurrency, embedding/rerank 因并发被上游强制为 1 而用 batch_size)。套餐不围绕『跑多久』做取舍: 每一档都用配置里的真实施压时长, 卡片也不显示预计耗时。",
+    "full": {
+      "chat":      {"field": "concurrency", "x": "num_concurrency", "values": [4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256]},
+      "embedding": {"field": "batch",       "x": "batch_size",      "values": [8, 16, 32, 64, 96, 128, 192, 256, 384, 512, 768, 1024]},
+      "rerank":    {"field": "batch",       "x": "batch_size",      "values": [8, 16, 32, 64, 96, 128, 192, 256, 384, 512]}
+    }
+  },
+  "presets": [
+    {
+      "id": "capacity", "name": "帮我找出能扛多少", "kind": "series", "default": true,
+      "icon": "📈", "tag": "整串 · 自动出拐点图",
+      "what": "从低负载到高负载，逐级把并发／批大小往上推，一次自动跑完整条梯子",
+      "see": "吞吐在哪一档不再增长、P99 在哪一档突然起飞 —— 那个拐点就是这台服务能扛的上限",
+      "when": "不知道该设多少并发／批大小、想先摸清服务底细时（新手默认选这个）",
+      "ladder": "full", "chart_metric": "throughput"
+    },
+    {
+      "id": "latency-knee", "name": "找延迟拐点", "kind": "series",
+      "icon": "⏱", "tag": "整串 · 盯 P99",
+      "what": "同样逐级加压，重点盯 P99／TTFT 延迟曲线",
+      "see": "延迟从平缓变陡的那一档，就是体验开始变差的拐点",
+      "when": "在线服务对延迟敏感，想知道「多少并发以内还够快」",
+      "ladder": "full", "chart_metric": "p99"
+    },
+    {
+      "id": "max-throughput", "name": "找最大吞吐", "kind": "series",
+      "icon": "🚀", "tag": "整串 · 盯吞吐",
+      "what": "逐级加压，重点看每秒请求数／token 吞吐的饱和点",
+      "see": "吞吐见顶的那一档，再往上加负载只是徒增延迟",
+      "when": "离线批处理，只想把吞吐榨到最大",
+      "ladder": "full", "chart_metric": "tokens_throughput"
+    },
+    {
+      "id": "standard", "name": "标准施压", "kind": "single",
+      "icon": "🎯", "tag": "单点 · 一次",
+      "what": "用一个中高档固定负载做一次完整稳态压测",
+      "see": "这一档的吞吐／P50／P99／错误率全貌",
+      "when": "只想快速验证一次，不想跑整串",
+      "set": {
+        "chat":      {"concurrency": 32, "length": "1k"},
+        "embedding": {"batch": 128, "doc_length": 512},
+        "rerank":    {"batch": 128, "length": "512_64"}
+      }
+    },
+    {
+      "id": "soak", "name": "长时间烤机", "kind": "single",
+      "icon": "🔥", "tag": "单点 · 高负载",
+      "what": "用持续的高档负载压住服务，观察是否稳定",
+      "see": "持续高负载下有没有错误率上升／性能衰减",
+      "when": "上线前想确认服务在高负载下不崩",
+      "set": {
+        "chat":      {"concurrency": 128, "length": "1k"},
+        "embedding": {"batch": 512, "doc_length": 1024},
+        "rerank":    {"batch": 256, "length": "512_64"}
+      }
+    },
+    {
+      "id": "long-context", "name": "长上下文压测", "kind": "single",
+      "icon": "📚", "tag": "单点 · 长输入",
+      "what": "把输入长度拉到最长，压显存／KV Cache",
+      "see": "长输入下吞吐与 P99 是否明显塌陷",
+      "when": "业务里有长文档／长对话，要验证这一档扛不扛得住",
+      "set": {
+        "chat":      {"concurrency": 32, "length": "8k"},
+        "embedding": {"batch": 128, "doc_length": 4096},
+        "rerank":    {"batch": 128, "length": "2048_256"}
+      }
+    },
+    {
+      "id": "extreme", "name": "极限施压", "kind": "single",
+      "icon": "💥", "tag": "单点 · 探边界",
+      "what": "并发／批大小 + 输入长度都拉到最高，试探崩溃边界",
+      "see": "错误率、超时、P99 尖刺 —— 服务的极限在哪",
+      "when": "想主动找上限、压出失败点做容量规划",
+      "set": {
+        "chat":      {"concurrency": 256, "length": "4k"},
+        "embedding": {"batch": 1024, "doc_length": 2048},
+        "rerank":    {"batch": 512, "length": "1024_128"}
+      }
+    }
+  ],
+  "glossary": {
+    "_comment": "小白名词表(护栏#6: 与推荐值/套餐同在一个配置文件, 改这里重启即生效, 不用改前端)。前端把它渲染在: 每个参数下方的『大白话』提示、独立名词表区、每张套餐卡的组合说明、图表页『怎么读曲线』。",
+    "intro": "完全不懂这些参数也没关系：先选一个套餐，它会把参考值填进下面的表单；这些值只是建议，你可以随便改，确认没问题再点『发起实验』。下面先用人话解释每个参数、常见组合、以及跑完的曲线怎么看。",
+    "field_plain": {
+      "api_backend": "你的模型服务用的是哪套接口协议。绝大多数兼容 OpenAI 的服务选 openai 就行；vllm/sglang 是自托管推理框架专用的。选错会连不上或报错。",
+      "api_base": "模型服务的网址（接口地址）。压测请求就发到这里，通常长这样 http://主机:端口/v1。填错了会『连不上』。",
+      "api_model_name": "要压的那个模型的名字（服务里部署的模型 ID）。请求里就靠这个名字告诉服务调哪个模型。",
+      "model_tokenizer": "分词器：把文字切成模型能懂的小块，用来算输入/输出长度。可以手填 HuggingFace 名字（需联网），或用上面的『上传本地文件』选一个离线包（不联网也能用）。要和目标模型配套，长度才算得准。",
+      "spawn_rate": "每秒新增多少个虚拟用户（爬坡速度）。一般留空即可，默认跟并发一致。这是高级项，新手不用改。",
+      "warmup_ratio": "开头多大比例的请求不算进统计（预热）。刚启动时常有冷启动抖动，预热能滤掉它。留空用默认即可。",
+      "metrics_time_unit": "延迟类指标用什么单位显示：秒(s) 或 毫秒(ms)。只影响显示，不影响压测本身。",
+      "server_engine": "记录一下服务端用的推理引擎（vLLM / SGLang 等），只是写进报告方便日后对照，不影响压测。",
+      "server_version": "记录服务端版本号，同上，纯备注。",
+      "server_gpu_type": "记录服务端加速卡型号，纯备注，不影响压测。下拉里按厂商分组列了 NVIDIA / AMD / 华为昇腾(Ascend 310P·910B·910C·950PR·950DT·Atlas) / 阿里真武(Zhenwu 810E·M890·V900) 与含光 / 海光 / 寒武纪 / 昆仑芯；你的卡不在列表里就直接手填任意型号。",
+      "server_gpu_count": "记录服务端 GPU 数量，同上，纯备注。",
+      "concurrency": "同时发多少个请求（虚拟用户数）。这是最核心的『压力旋钮』：数值越大，同时挤进服务的请求越多，越容易压出延迟/吞吐拐点。太小只是连通性测试，太大可能直接把服务压崩。",
+      "length": "每次对话喂给模型多长的输入、要它回多长（token 数）。越长越吃显存和算力：短≈100、长问答≈1k、长上下文≈4k~8k。长输入 + 高并发是最重的组合。",
+      "duration": "每一档压多久（分钟）。只影响『这一档采样时间够不够稳』，不是省时间的开关——套餐不会为了快而缩短它。留默认即可。",
+      "batch": "一次请求里塞多少条文档一起处理。Embedding/Rerank 的批内并行由它决定：批越大越压显存。它可以和『并发』自由组合——批10×并发10 与 批2×并发50 总在飞文档数一样，但对显存/调度的要求不同。",
+      "doc_length": "每条文档多长（token 数）。越长算得越久、越吃显存。Embedding 用它和『批大小』一起施压。",
+      "query_length": "查询串多长（token 数）。Rerank 里和文档长度一起决定一次要处理多少文字。"
+    },
+    "terms": [
+      {"term": "并发 (c)", "plain": "同一时刻一起发的请求数。像『同时开几个窗口办事』，开得越多，服务越忙、越容易排队。"},
+      {"term": "对话/文档长度 (L / d)", "plain": "一次请求里文字有多长。像『一次搬的东西有多重』，越长越费显存和算力。"},
+      {"term": "批大小 (b)", "plain": "一个请求里打包几条一起算。批内本身就并行，批越大越吃显存；它和『并发』是两个独立的旋钮，可以组合出总压力相同、切分不同的负载。"},
+      {"term": "总在飞文档数", "plain": "批大小 × 并发。例如 批10×并发10 = 100，批2×并发50 也是 100：总压力一样，但前者是「少量大请求」、后者是「大量小请求」，对显存和调度的影响不同，这正是用来对比的地方。"},
+      {"term": "时长 (t)", "plain": "每档压测持续几分钟。只是采样时间，不是『跑得快不快』的开关；套餐不会为了省时间把它调短。"},
+      {"term": "吞吐 (req/s、tok/s)", "plain": "每秒能处理多少请求 / 多少 token。越高越好，代表服务干得越快。"},
+      {"term": "P50 / P99 延迟", "plain": "把每次请求的耗时从快到慢排队：P50 是中间那次（一般水平），P99 是最慢的 1%（最差体验）。这两个越小越好。"},
+      {"term": "TTFT", "plain": "首字延迟：从发请求到收到第一个字的时间。聊天场景最影响『感觉快不快』。"},
+      {"term": "错误率", "plain": "失败的请求占比。压到太高负载时它会突然上升，说明服务开始扛不住了。"},
+      {"term": "拐点 / 饱和点", "plain": "负载继续加，但吞吐不再涨、或者 P99 延迟突然变陡的那一档。它就是『这台服务能扛的合理上限』。"},
+      {"term": "整串 / 扫描", "plain": "一次自动把某个旋钮（如并发）从低到高逐个档位各跑一遍，严格一档一档来，最后自动画成一张对比/拐点图。"}
+    ],
+    "combos": [
+      {"name": "低并发 + 短输入", "plain": "最轻，只验证能不能连通、基本多快。适合第一次探活，压不出拐点。"},
+      {"name": "高并发 + 短输入", "plain": "重点压『同时多少请求』，看排队和吞吐上限，适合在线聊天服务。"},
+      {"name": "低并发 + 长输入", "plain": "重点压『单次多重』，看显存/KV Cache 和长文本延迟，适合长文档/长对话业务。"},
+      {"name": "高并发 + 长输入", "plain": "最重的组合，压极限与崩溃边界，容易看到错误率和 P99 尖刺。新手最后再试。"},
+      {"name": "大批大小 + 长文档", "plain": "Embedding/Rerank 最重的单请求形态：一批塞很多长文档，显存压力大、单请求耗时也长。"},
+      {"name": "大批小并发 vs 小批大并发", "plain": "总在飞文档数相同（如 批10×并发10 与 批2×并发50），但前者少量大请求、后者大量小请求。哪个更快、哪个更容易 OOM，只能实测——两次跑完在历史页勾选两条并排对比。"},
+      {"name": "整串逐级加压", "plain": "把某一档旋钮从低到高全跑一遍，用对比图直接读出拐点，最省心的『摸底』方式。"}
+    ],
+    "preset_combo": {
+      "capacity": "组合含义：固定输入长度，把『并发/批大小』从低到高逐级拉满。低档看基线，高档看饱和——两段一对比，能扛多少一目了然。这是最推荐的摸底组合。",
+      "latency-knee": "组合含义：同样逐级加压，但重点盯最慢 1% 的延迟(P99)。曲线由平变陡的那一档 = 体验开始变差的并发上限，适合对延迟敏感的在线服务。",
+      "max-throughput": "组合含义：逐级加压看每秒吞吐在哪里见顶。到达饱和后再加负载只是白增延迟，适合只求把吞吐榨干的离线批处理。",
+      "standard": "组合含义：中高档固定负载 + 常规长度，一次完整稳态采样。不算轻也不到极限，用来快速得到一个『这服务现在啥水平』的全貌。",
+      "soak": "组合含义：持续的高档负载压住服务不松手，观察长时间下会不会错误率上升、性能衰减。用于上线前稳定性验证。",
+      "long-context": "组合含义：把输入拉到最长，专门压显存/KV Cache。看长文本下吞吐与 P99 是否明显塌陷，适合长文档、长对话业务。",
+      "extreme": "组合含义：并发/批大小 + 输入长度同时拉到最高，主动试探崩溃边界。会看到错误率、超时、P99 尖刺，用于容量规划找极限。"
+    },
+    "read_chart": {
+      "intro": "曲线怎么看（一句话版）：横轴是『压力档位』（并发/批大小，越往右压力越大），纵轴是这个压力下测出来的指标。",
+      "points": [
+        "吞吐线（越大越好）：往右走一开始会涨，到某一档开始走平甚至回落——走平处就是饱和点。",
+        "P99 延迟线（越小越好）：往右走一开始很平，到某一档突然翘起来——翘起处就是体验拐点。",
+        "错误率线（越小越好）：一直贴着 0 最好；一旦明显抬头，说明那一档服务已经扛不住了。",
+        "三条线合起来看：『吞吐不再涨 + P99 突然变陡』的那一档，就是这台服务能扛的合理上限，再往右就是过载。"
+      ],
+      "hint": "单条时序图看的是这一档跑的过程中指标稳不稳；多条对比/拐点图看的是『随压力变化』的趋势，找上限主要用后者。"
+    }
+  },
+  "tasks": [
+    {
+      "id": "chat",
+      "display_name": "Chat · 文本生成",
+      "short_code": "chat",
+      "task": "text-to-text",
+      "defaults_note": "施压档: 长问答 ~1k / 并发 32 / 稳态 10min。默认档要能压出延迟/吞吐拐点, 不做只探连通性的轻载。",
+      "overrides": {},
+      "fields": [
+        {
+          "key": "length", "label": "对话长度", "type": "select", "abbrev": "L", "default": "1k",
+          "maps_to": "traffic_scenario", "group": "primary", "sweepable": true,
+          "hint": "映射到引擎的 D(输入,输出) 场景串",
+          "options": [
+            {"label": "短 ~100", "value": "100", "short": "L100", "slug": "L100", "scenario": "D(128,128)"},
+            {"label": "长问答 ~1k", "value": "1k", "short": "L1k", "slug": "L1k", "scenario": "D(1024,512)"},
+            {"label": "中长 ~2k", "value": "2k", "short": "L2k", "slug": "L2k", "scenario": "D(2048,512)"},
+            {"label": "长上下文 ~4k", "value": "4k", "short": "L4k", "slug": "L4k", "scenario": "D(4096,512)"},
+            {"label": "超长 ~8k", "value": "8k", "short": "L8k", "slug": "L8k", "scenario": "D(8192,512)"}
+          ]
+        },
+        {
+          "key": "concurrency", "label": "并发", "type": "select", "abbrev": "c", "default": 32,
+          "maps_to": "num_concurrency", "wrap_list": true, "group": "primary", "sweepable": true, "allow_custom": true,
+          "hint": "一次实验只跑一个并发点; 想看拐点请用上面的「整串」套餐或「参数扫描」串行跑多个点",
+          "options": [
+            {"label": "4", "value": 4, "short": "c4", "slug": "c4"},
+            {"label": "8", "value": 8, "short": "c8", "slug": "c8"},
+            {"label": "16", "value": 16, "short": "c16", "slug": "c16"},
+            {"label": "24", "value": 24, "short": "c24", "slug": "c24"},
+            {"label": "32", "value": 32, "short": "c32", "slug": "c32"},
+            {"label": "48", "value": 48, "short": "c48", "slug": "c48"},
+            {"label": "64", "value": 64, "short": "c64", "slug": "c64"},
+            {"label": "96", "value": 96, "short": "c96", "slug": "c96"},
+            {"label": "128", "value": 128, "short": "c128", "slug": "c128"},
+            {"label": "192", "value": 192, "short": "c192", "slug": "c192"},
+            {"label": "256", "value": 256, "short": "c256", "slug": "c256"}
+          ]
+        },
+        {
+          "key": "duration", "label": "时长", "type": "select", "abbrev": "t", "default": 10,
+          "maps_to": "max_time_per_run", "group": "primary",
+          "options_ref": "durations"
+        }
+      ],
+      "key_param_order": ["concurrency", "length", "duration"],
+      "fixed": {"iteration_type": "num_concurrency", "batch_size": [1]},
+      "model": ""
+    },
+    {
+      "id": "embedding",
+      "display_name": "Embedding · 向量生成",
+      "short_code": "emb",
+      "task": "text-to-embeddings",
+      "defaults_note": "施压档: 批 128 / 文档 512 / 并发 1 / 稳态 10min。并发现在可改(1/2/4/8/16/32/64): 引擎按 batch_size 迭代, 并发作为整串固定的另一维, 所以能直接对比 批10×并发10 与 批2×并发50 这类『总在飞文档数相同、切分不同』的组合。默认 1 = 并行全在单请求 batch 内, 最稳; 想压显存/调度就调高并发。",
+      "overrides": {},
+      "fields": [
+        {
+          "key": "batch", "label": "批大小", "type": "select", "abbrev": "b", "default": 128,
+          "maps_to": "batch_size", "wrap_list": true, "group": "primary", "sweepable": true, "allow_custom": true,
+          "hint": "单请求内并行处理的文档数；可手填任意值（例如 10），再配一个并发就能做 批10×并发10 的对比",
+          "options": [
+            {"label": "8", "value": 8, "short": "b8", "slug": "b8"},
+            {"label": "16", "value": 16, "short": "b16", "slug": "b16"},
+            {"label": "32", "value": 32, "short": "b32", "slug": "b32"},
+            {"label": "64", "value": 64, "short": "b64", "slug": "b64"},
+            {"label": "96", "value": 96, "short": "b96", "slug": "b96"},
+            {"label": "128", "value": 128, "short": "b128", "slug": "b128"},
+            {"label": "192", "value": 192, "short": "b192", "slug": "b192"},
+            {"label": "256", "value": 256, "short": "b256", "slug": "b256"},
+            {"label": "384", "value": 384, "short": "b384", "slug": "b384"},
+            {"label": "512", "value": 512, "short": "b512", "slug": "b512"},
+            {"label": "768", "value": 768, "short": "b768", "slug": "b768"},
+            {"label": "1024", "value": 1024, "short": "b1024", "slug": "b1024"}
+          ]
+        },
+        {
+          "key": "doc_length", "label": "文档长度", "type": "select", "abbrev": "L", "default": 512,
+          "maps_to": "traffic_scenario", "group": "primary", "sweepable": true,
+          "hint": "映射到引擎的 E(文档 token 数) 场景串",
+          "options": [
+            {"label": "128", "value": 128, "short": "L128", "slug": "L128", "scenario": "E(128)"},
+            {"label": "256", "value": 256, "short": "L256", "slug": "L256", "scenario": "E(256)"},
+            {"label": "512", "value": 512, "short": "L512", "slug": "L512", "scenario": "E(512)"},
+            {"label": "1024", "value": 1024, "short": "L1024", "slug": "L1024", "scenario": "E(1024)"},
+            {"label": "2048", "value": 2048, "short": "L2048", "slug": "L2048", "scenario": "E(2048)"},
+            {"label": "4096", "value": 4096, "short": "L4096", "slug": "L4096", "scenario": "E(4096)"}
+          ]
+        },
+        {
+          "key": "concurrency", "label": "并发", "type": "select", "abbrev": "c", "default": 1,
+          "maps_to": "num_concurrency", "wrap_list": true, "group": "primary", "sweepable": true, "allow_custom": true,
+          "hint": "同时有多少个请求在飞（每个请求带『批大小』篇文档）。批大小 × 并发 = 同时在飞的总文档数",
+          "plain": "同时有多少个请求在跑。每个请求一次送『批大小』篇文档，所以 批10 × 并发10 = 100 篇同时在飞；批2 × 并发50 也是 100 篇。两者总压力相同，但对显存/调度的要求不同 —— 这个旋钮就是用来对比它们的。",
+          "options": [
+            {"label": "1", "value": 1, "short": "c1", "slug": "c1"},
+            {"label": "2", "value": 2, "short": "c2", "slug": "c2"},
+            {"label": "4", "value": 4, "short": "c4", "slug": "c4"},
+            {"label": "8", "value": 8, "short": "c8", "slug": "c8"},
+            {"label": "16", "value": 16, "short": "c16", "slug": "c16"},
+            {"label": "32", "value": 32, "short": "c32", "slug": "c32"},
+            {"label": "64", "value": 64, "short": "c64", "slug": "c64"}
+          ]
+        },
+        {
+          "key": "duration", "label": "时长", "type": "select", "abbrev": "t", "default": 10,
+          "maps_to": "max_time_per_run", "group": "primary",
+          "options_ref": "durations"
+        }
+      ],
+      "key_param_order": ["batch", "doc_length", "concurrency", "duration"],
+      "fixed": {"iteration_type": "batch_size"},
+      "combo_note": "批大小 × 并发 可以自由组合: 例如 批10/并发10 与 批2/并发50 总在飞文档数相同, 但显存占用与调度开销不同。两次跑完后在历史页勾选两条即可并排对比。"
+    },
+    {
+      "id": "rerank",
+      "display_name": "Rerank · 重排序",
+      "short_code": "rr",
+      "task": "text-to-rerank",
+      "defaults_note": "施压档: 文档 512 + 查询 64 / 文档批 128 / 并发 1 / 稳态 10min。并发可改(1/2/4/8/16/32/64): 引擎按 batch_size 迭代、并发是整串固定的另一维, 因此 批10×并发10 与 批2×并发50 都能真实跑出来并对比。默认 1 最稳, 调高并发压显存与调度。任务后端只允许 vllm/sglang (上游 validate_task 限制)。",
+      "overrides": {"api_backend": {"default": "vllm", "options": ["vllm", "sglang"]}},
+      "fields": [
+        {
+          "key": "length", "label": "文档/查询长度", "type": "select", "abbrev": "d", "default": "512_64",
+          "maps_to": "traffic_scenario", "group": "primary", "sweepable": true,
+          "hint": "映射到引擎的 R(文档 token, 查询 token) 场景串",
+          "plain": "Rerank 里一次要处理多少文字：前半是文档长度、后半是查询长度（token 数）。两者都越长，一次要算的东西越多、越吃显存。它和『文档批』一起决定重排序的压力。",
+          "options": [
+            {"label": "256 + 32", "value": "256_32", "short": "d256q32", "slug": "d256q32", "scenario": "R(256,32)"},
+            {"label": "512 + 64", "value": "512_64", "short": "d512q64", "slug": "d512q64", "scenario": "R(512,64)"},
+            {"label": "1024 + 128", "value": "1024_128", "short": "d1024q128", "slug": "d1024q128", "scenario": "R(1024,128)"},
+            {"label": "2048 + 256", "value": "2048_256", "short": "d2048q256", "slug": "d2048q256", "scenario": "R(2048,256)"}
+          ]
+        },
+        {
+          "key": "batch", "label": "文档批", "type": "select", "abbrev": "b", "default": 128,
+          "maps_to": "batch_size", "wrap_list": true, "group": "primary", "sweepable": true, "allow_custom": true,
+          "hint": "单个重排序请求内的文档数；可手填任意值（例如 10），再配一个并发就能做 批10×并发10 的对比",
+          "options": [
+            {"label": "8", "value": 8, "short": "b8", "slug": "b8"},
+            {"label": "16", "value": 16, "short": "b16", "slug": "b16"},
+            {"label": "32", "value": 32, "short": "b32", "slug": "b32"},
+            {"label": "64", "value": 64, "short": "b64", "slug": "b64"},
+            {"label": "96", "value": 96, "short": "b96", "slug": "b96"},
+            {"label": "128", "value": 128, "short": "b128", "slug": "b128"},
+            {"label": "192", "value": 192, "short": "b192", "slug": "b192"},
+            {"label": "256", "value": 256, "short": "b256", "slug": "b256"},
+            {"label": "384", "value": 384, "short": "b384", "slug": "b384"},
+            {"label": "512", "value": 512, "short": "b512", "slug": "b512"}
+          ]
+        },
+        {
+          "key": "concurrency", "label": "并发", "type": "select", "abbrev": "c", "default": 1,
+          "maps_to": "num_concurrency", "wrap_list": true, "group": "primary", "sweepable": true, "allow_custom": true,
+          "hint": "同时有多少个重排序请求在飞（每个请求带『文档批』篇文档）。文档批 × 并发 = 同时在飞的总文档数",
+          "plain": "同时有多少个重排序请求在跑。每个请求一次给『文档批』篇文档，所以 批10 × 并发10 = 100 篇同时参与重排；批2 × 并发50 也是 100 篇，但拆成了更多更小的请求。对比它们就能看出显存/调度哪个先吃不消。",
+          "options": [
+            {"label": "1", "value": 1, "short": "c1", "slug": "c1"},
+            {"label": "2", "value": 2, "short": "c2", "slug": "c2"},
+            {"label": "4", "value": 4, "short": "c4", "slug": "c4"},
+            {"label": "8", "value": 8, "short": "c8", "slug": "c8"},
+            {"label": "16", "value": 16, "short": "c16", "slug": "c16"},
+            {"label": "32", "value": 32, "short": "c32", "slug": "c32"},
+            {"label": "64", "value": 64, "short": "c64", "slug": "c64"}
+          ]
+        },
+        {
+          "key": "duration", "label": "时长", "type": "select", "abbrev": "t", "default": 10,
+          "maps_to": "max_time_per_run", "group": "primary",
+          "options_ref": "durations"
+        }
+      ],
+      "key_param_order": ["length", "batch", "concurrency", "duration"],
+      "fixed": {"iteration_type": "batch_size"},
+      "combo_note": "文档批 × 并发 可以自由组合; 总在飞文档数相同、切分方式不同的两种配置可以并排对比。"
+    }
+  ],
+  "deviations": [
+    "跳「现有 Live UI Dashboard」: 仓库里 genai_bench/ui/dashboard.py 是 Rich 终端 Live 面板, 全仓无 HTTP Dashboard/路由/端口, 所以本实现提供一个只读的应用内实时监控页 (/dashboard/<run_id>), 复用 run_id 作定位主键, 不发明新定位参数, 不重算指标。",
+    "max_requests 不设上限: --max-requests-per-run 是 required IntRange(min=1) 且 manage_run_time 会按请求数提前退出, 无法真正不设, 故用哨兵值 2000000000 让「时长」成为唯一真实限制。",
+    "Rerank / Embedding 并发: 上游原本对这两个任务强制 num_concurrency=[1] 且 iteration_type=batch_size。本实现小改了引擎(cli/validation.py 尊重显式传入的 --num-concurrency、cli/utils.py get_run_params 接受固定并发、cli.py 传递、aggregated_metrics_collector 如实记录并发数), 迭代维度仍是 batch_size, 但并发成为整串固定的另一维, 因此 批10×并发10 与 批2×并发50 可真实对比。",
+    "对话/文档长度: 引擎没有独立字段, 用的是场景串 D(in,out)/E(n)/R(doc,query); 本文件把友好选项映射成合法场景串, 前端只传 option value, 不接触引擎细节。",
+    "事后时序图: 结果 JSON 没有时间列, 单条图用 individual_request_metrics 的逐请求值(只读)或跨迭代点曲线; 绝不重算百分位/统计。"
+  ]
+}

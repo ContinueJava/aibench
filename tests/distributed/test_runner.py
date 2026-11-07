@@ -90,6 +90,43 @@ def test_batch_size_update(distributed_runner, mock_environment):
     assert mock_environment.sampler.batch_size == batch_size
 
 
+def test_update_scenario_remembers_current_value(mock_environment, mock_dashboard):
+    """The latest scenario is kept so a late worker can be brought up to date."""
+    config = DistributedConfig(num_workers=0)
+    runner = DistributedRunner(mock_environment, config, dashboard=mock_dashboard)
+    runner.setup()
+
+    runner.update_scenario("D(100,100)")
+    runner.update_batch_size(8)
+
+    assert runner._current_scenario == "D(100,100)"
+    assert runner._current_batch_size == 8
+
+
+def test_worker_connect_resends_current_settings(mock_environment, mock_dashboard):
+    """A worker connecting after the broadcast still receives the settings."""
+    config = DistributedConfig(num_workers=0)
+    runner = DistributedRunner(mock_environment, config, dashboard=mock_dashboard)
+    runner.setup()
+
+    # Nothing to replay before the first broadcast.
+    mock_environment.runner.send_message.reset_mock()
+    runner._on_worker_connect(client_id="worker-1")
+    assert mock_environment.runner.send_message.call_count == 0
+
+    runner.update_scenario("D(100,100)")
+    runner.update_batch_size(8)
+    mock_environment.runner.send_message.reset_mock()
+
+    runner._on_worker_connect(client_id="worker-2")
+
+    mock_environment.runner.send_message.assert_any_call(
+        "update_scenario", "D(100,100)"
+    )
+    mock_environment.runner.send_message.assert_any_call("update_batch_size", 8)
+    assert mock_environment.runner.send_message.call_count == 2
+
+
 def test_message_handlers_registration(mock_environment, mock_dashboard):
     """Test that all message handlers are registered in all modes"""
     # Test local mode

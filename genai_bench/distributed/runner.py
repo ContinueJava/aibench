@@ -7,6 +7,7 @@ import multiprocessing
 import os
 from dataclasses import dataclass
 from multiprocessing.queues import Queue
+from queue import Empty
 from typing import Any, Dict, List, Optional, Protocol
 
 import gevent
@@ -127,6 +128,10 @@ class DistributedRunner:
         self.dashboard = dashboard
         self._worker_processes: List[multiprocessing.Process] = []
         self.metrics_collector: Optional[AggregatedMetricsCollector] = None
+        # Last values broadcast to workers; replayed when a worker connects so
+        # a late or reconnecting worker still receives the current settings.
+        self._current_scenario: Optional[str] = None
+        self._current_batch_size: Optional[int] = None
         self.worker_log_queue: Queue = multiprocessing.Queue()
 
     def setup(self) -> None:
@@ -167,6 +172,12 @@ class DistributedRunner:
         gevent.sleep(self.config.wait_time)
         self._register_message_handlers()
 
+        # A worker that connects (or reconnects) after the scenario was sent
+        # never receives it, and then every request fails with an
+        # AttributeError because the environment has no scenario. Re-broadcast
+        # the current settings whenever a worker shows up.
+        self.environment.events.worker_connect.add_listener(self._on_worker_connect)
+
         # Start log consumer greenlet
         self.log_consumer = gevent.spawn(self._consume_worker_logs)
 
@@ -189,11 +200,17 @@ class DistributedRunner:
         """Consume logs from worker processes"""
         try:
             while True:
-                if self.worker_log_queue.empty():
+                # multiprocessing.Queue.empty() is documented as unreliable and
+                # the queue can change between empty() and get_nowait(); the
+                # resulting queue.Empty used to escape this loop and kill the
+                # consumer greenlet, after which worker logs were silently
+                # dropped for the rest of the run.
+                try:
+                    log_data = self.worker_log_queue.get_nowait()
+                except Empty:
                     gevent.sleep(0.1)
                     continue
 
-                log_data = self.worker_log_queue.get_nowait()
                 self._process_log_data(log_data)
 
         except KeyboardInterrupt:
@@ -202,8 +219,11 @@ class DistributedRunner:
 
     def _drain_log_queue(self):
         """Drain remaining logs from the queue"""
-        while not self.worker_log_queue.empty():
-            log_data = self.worker_log_queue.get_nowait()
+        while True:
+            try:
+                log_data = self.worker_log_queue.get_nowait()
+            except Empty:
+                return
             self._process_log_data(log_data)
 
     def _setup_local(self) -> None:
@@ -426,13 +446,29 @@ class DistributedRunner:
 
     def update_scenario(self, scenario_str: str) -> None:
         """Update scenario on all nodes"""
+        self._current_scenario = scenario_str
         if self.environment.runner:
             self.environment.runner.send_message("update_scenario", scenario_str)
 
     def update_batch_size(self, batch_size: int) -> None:
         """Update batch size on all nodes"""
+        self._current_batch_size = batch_size
         if self.environment.runner:
             self.environment.runner.send_message("update_batch_size", batch_size)
+
+    def _on_worker_connect(self, client_id: str = "", **kwargs) -> None:
+        """Re-send the current scenario and batch size to a new worker."""
+        if not self.environment.runner:
+            return
+        logger.info(f"Worker {client_id} connected; re-sending current settings")
+        if self._current_scenario is not None:
+            self.environment.runner.send_message(
+                "update_scenario", self._current_scenario
+            )
+        if self._current_batch_size is not None:
+            self.environment.runner.send_message(
+                "update_batch_size", self._current_batch_size
+            )
 
     def _handle_batch_size_update(self, environment: Environment, msg: Any) -> None:
         """Handle batch size update messages"""

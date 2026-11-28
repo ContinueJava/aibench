@@ -25,7 +25,7 @@ RUN node frontend/build.mjs \
     && echo "frontend/ removed from the prepared source tree"
 
 # ---- Stage 2: final Python image (NO Node, NO frontend/) --------------------
-FROM python:3.11-slim
+FROM python:3.13-slim
 WORKDIR /genai-bench
 ENV PATH="/root/.local/bin:${PATH}" \
     ENABLE_UI="true" \
